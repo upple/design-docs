@@ -303,14 +303,15 @@ flowchart LR
         AdminAlert["관리자 모바일 즉시 알림 수신 🚨"]
     end
 
-    Systemd -->|마운트 성공 시에만| Docker
-    Docker --> DataDirs
+    Systemd -->|"마운트 성공 시에만"| Docker
+    Docker --> Orig
+    Docker --> DBDir
 
-    DiskCheck -->|여유 공간 < 10% (위험)| Webhook
-    DiskCheck -->|여유 공간 < 15% 또는 100GB| BlockWrite["신규 업로드 & 내보내기 자동 차단"]
-    MountCheck -->|I/O 에러 / 언마운트 감지| Webhook
-    MountCheck -->|미마운트 시| EmergencyStop["FastAPI 파일 쓰기 즉시 중단 (OS Root 오염 방지)"]
-    BackupCheck -->|백업 실패 시| Webhook
+    DiskCheck -->|"여유 공간 10% 미만 (위험)"| Webhook
+    DiskCheck -->|"여유 공간 15% 미만 또는 100GB 미만"| BlockWrite["신규 업로드 & 내보내기 자동 차단"]
+    MountCheck -->|"I/O 에러 / 언마운트 감지"| Webhook
+    MountCheck -->|"미마운트 시"| EmergencyStop["FastAPI 파일 쓰기 즉시 중단 (OS Root 오염 방지)"]
+    BackupCheck -->|"백업 실패 시"| Webhook
 
     Webhook --> AdminAlert
 ```
