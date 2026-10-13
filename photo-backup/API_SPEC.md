@@ -75,7 +75,7 @@ PWA는 session token을 localStorage/IndexedDB에 저장하지 않습니다. 인
 
 필드: original_name, expected_size, client_mime_type, client_modified_at(optional), expected_sha256(required).
 
-클라이언트는 파일 전체를 메모리에 적재하지 않고 incremental SHA-256을 계산합니다. 브라우저 구현은 Web Worker와 incremental hashing을 사용하고 준비 진행률을 표시합니다. 서버는 기대 hash를 검증 전 입력으로만 취급합니다.
+클라이언트는 파일 전체를 메모리에 적재하지 않고 incremental SHA-256을 계산합니다. 브라우저 구현은 Web Worker와 WebAssembly(Wasm) 가속 스트리밍 해싱(hash-wasm 등)을 사용해 대용량 미디어 처리 시 CPU 발열과 OOM을 방지하고 실시간 준비 진행률을 표시합니다. 업로드 중에는 Screen Wake Lock API를 활성화하여 모바일 화면 꺼짐에 따른 네트워크 중단을 방지합니다. 서버는 기대 hash를 검증 전 입력으로만 취급합니다.
 
 POST 처리 순서:
 1. 계정이 active 상태인지 확인합니다.

@@ -57,6 +57,9 @@
 - PLAT-08 iOS PWA 여러 파일은 ZIP으로 Files에 내려받고 사용자가 추출·사진 앱으로 가져옴. PWA가 Photos에 직접 일괄 쓰는 것으로 약속하지 않음
 - PLAT-09 브라우저 저장소에는 세션 복구용 ID·오프셋만 저장. 토큰은 localStorage/IndexedDB에 저장하지 않음
 - PLAT-10 PWA service worker는 정적 셸만 캐시하며 개인 사진·동영상·인증 응답은 캐시하지 않음
+- PLAT-11 iOS PWA 업로드 진행 중 Screen Wake Lock API를 요청하여 화면 자동 잠금에 따른 세션 중단을 방지하고 UI에 '화면 켜짐 유지' 상태를 안내함
+- PLAT-12 iOS PWA 대용량 미디어 사전 해시는 WebAssembly(Wasm) 가속 스트리밍 SHA-256 라이브러리(hash-wasm 등)를 적용하여 연산 시간과 배터리 소모를 최소화함
+- PLAT-13 iOS PWA 다중 다운로드(ZIP) 완료 시 사용자가 Files 앱에서 사진 보관함으로 쉽게 가져올 수 있도록 3단계 시각적 가이드 모달(Files 열기 → 압축 해제 → 사진 저장)을 제공함
 
 ## 5. 삭제 및 복원
 
@@ -88,6 +91,7 @@
 - ADM-07 디스크 부족·마운트 오류·백업 실패 경고
 - ADM-08 관리자 웹/API는 별도 관리자 호스트에서 실제 LAN CIDR에만 허용
 - ADM-09 관리자 UI에서 사진을 열람·다운로드하는 기능은 MVP 제외
+- ADM-10 디스크 90% 초과, 외장 SSD 탈락, DB 백업 실패 등 치명적 운영 장애 발생 시 Telegram/Discord 무료 웹훅으로 관리자에게 즉시 알림 발송
 
 ## 8. 비기능 요구사항
 
@@ -101,6 +105,10 @@
 - NFR-08 PWA의 개인 미디어 캐시 금지
 - NFR-09 CI에서 API·웹 빌드를 재현 가능하게 구성
 - NFR-10 iOS PWA 실기기 테스트 포함
+- NFR-11 라즈베리파이 원클릭 대화형 설치 스크립트(deploy/setup.sh)로 TTHW < 10분 온보딩 지원
+- NFR-12 로컬 PC에서 즉시 테스트 가능한 Docker Compose 프로필(deploy/docker-compose.dev.yml) 제공
+- NFR-13 SQLite 일일 백업은 온라인 백업 API(.backup)를 적용해 WAL 복사 손상 방지
+- NFR-14 Pillow/FFmpeg 백그라운드 썸네일 워커는 동시성 1개 제한 및 nice 19로 실행하여 라즈베리파이 5 부하 방지
 
 ## 9. MVP 제외
 

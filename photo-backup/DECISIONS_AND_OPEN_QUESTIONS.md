@@ -18,9 +18,14 @@
 | ADR-012 | 사용자별 SHA-256 중복 감지 및 명시적 선택 | 데이터 격리와 사용자 제어 |
 | ADR-013 | 공유·자동 백업 MVP 제외 | 핵심 수동 백업 기능 우선 |
 | ADR-014 | 사용자당 300GB, 80% 경고 | 전체 저장 공간 여유 |
-| ADR-015 | DB 백업 7일 동일 SSD | 논리적 DB 복구. SSD 자체 장애 보호는 아님 |
-| ADR-016 | SSD 암호화·외부 사본 미적용 | 운영 편의/무료 우선, 데이터 손실 위험 수용 |
+| ADR-015 | DB 백업 7일 동일 SSD | 논리적 DB 복구. SSD 자체 장애 보호는 아님 (D1 결정으로 유지 재확인) |
+| ADR-016 | SSD 암호화·외부 사본 미적용 | 운영 편의/무료 우선, 데이터 손실 위험 수용 (D1 결정으로 유지 재확인) |
 | ADR-017 | ZIP export 24시간 TTL, 사용자당 1개 | iOS PWA의 다중 파일 전달 |
+| ADR-018 | iOS PWA 업로드 중 Screen Wake Lock 적용 | Safari 화면 자동 꺼짐에 따른 네트워크 세션 단절 방지 (D2) |
+| ADR-019 | WebAssembly(Wasm) 가속 스트리밍 해싱 채택 | 대용량 비디오 사전 해시 연산 시 iPhone CPU 발열 및 OOM 방지 (E2) |
+| ADR-020 | 치명적 운영 장애 시 Telegram/Discord 무료 웹훅 알림 | 무인 운영 중 SSD 탈락·디스크 부족·백업 실패 즉시 인지 (D3) |
+| ADR-021 | iOS PWA ZIP 다운로드 후 3단계 시각 가이드 모달 제공 | 비개발자 가족 사용자의 Files → 사진 보관함 가져오기 혼선 해소 (D-DES1) |
+| ADR-022 | 원클릭 대화형 setup.sh 및 docker-compose.dev.yml 제공 | 홈랩 1인 운영자 TTHW < 10분 단축 및 로컬 개발 패리티 확보 (D-DX1) |
 
 ## 2. iOS PWA 영향
 
@@ -60,8 +65,8 @@ iPhone 사용자는 Safari에서 홈 화면에 추가해 웹앱으로 엽니다.
 - 외부 네트워크: 공인 IP가 있어도 라우터·DNS·ISP 영향으로 실접속 검증 필요
 - 코덱: 일부 동영상은 스트리밍 불가 시 원본 다운로드 사용
 
-## 5. 이번 검토에서 반영한 수정
-
+## 5. 이번 검토에서 반영한 수정 (gstack 4대 플랜 리뷰)
+ 
 - 잘못된 assets.taken_at 인덱스 제거, asset_metadata timestamp 인덱스로 변경
 - Android token, PWA cookie, admin cookie 인증 분리
 - 중복 업로드 skip/store_separately API와 멱등성 정의
@@ -71,6 +76,11 @@ iPhone 사용자는 Safari에서 홈 화면에 추가해 웹앱으로 엽니다.
 - ZIP export, 공간 예약, 24시간 정리 정책 추가
 - 전역 공간 기준을 max(15%, 100GB)로 명확화
 - PWA service worker에서 개인 미디어/API 캐시 금지
+- **[CEO Review]** 외장 SSD 단일 보관 정책 고수 재확인(D1), iOS PWA Screen Wake Lock 도입(D2), 장애 웹훅 알림 추가(D3)
+- **[Eng Review]** SQLite WAL 동시 쓰기 락 방지를 위한 청크 I/O 분리(E1), WebAssembly 가속 해싱(E2), SQLite 온라인 백업(.backup) API 적용(E3)
+- **[Design Review]** PWA ZIP 다운로드 후 사진 앱 임포트 3단계 시각 가이드 모달(D-DES1), 타임라인 5대 인터랙션 상태 매트릭스 규격화
+- **[DevEx Review]** 원클릭 대화형 배포 스크립트(`deploy/setup.sh`)로 TTHW < 10분 단축(D-DX1), 로컬 개발 프로필(`docker-compose.dev.yml`) 분리
+- 10대 구현 과제(T1~T10)를 도출하여 우선순위화
 
 ## 6. 남은 검증
 

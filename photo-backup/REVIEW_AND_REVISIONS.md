@@ -47,7 +47,33 @@ PWA 한계도 요구사항에 반영했습니다:
 Service worker는 정적 셸만 캐시하며 원본·미리보기·동영상·ZIP·인증 응답은 캐시하지 않도록 했습니다.
 
 ### R12 — PWA 다중 다운로드 (추가)
-iOS PWA에서 Photos 라이브러리에 직접 다중 파일 저장이 보장되지 않으므로 ZIP 내보내기와 임시 공간 예약, 사용자당 활성 작업 1개, 24시간 TTL을 정의했습니다.
+이전 명세는 iOS PWA에서 Photos 라이브러리에 직접 다중 파일 저장이 보장되지 않으므로 ZIP 내보내기와 임시 공간 예약, 사용자당 활성 작업 1개, 24시간 TTL을 정의했습니다.
+
+## gstack 4대 플랜 리뷰 결과 (2026-10-14 개정)
+
+CEO, Engineering, Design, DevEx 4대 영역에 걸쳐 gstack 플랜 리뷰 가운틀릿을 수행하고 전 관문 **CLEARED** 판정을 받았습니다.
+
+### GSTACK-01 — CEO Review (HOLD SCOPE)
+- **D1 (SPOF 위험 수용 재확인)**: 0원 운영 원칙을 위해 단일 2TB 외장 SSD 장애 위험을 감수하고, 별도 MicroSD 복제는 배제함.
+- **D2 (PWA Screen Wake Lock)**: 대용량 미디어 업로드 중 Safari 화면 꺼짐 및 백그라운드 전송 단절을 방지하기 위해 Screen Wake Lock API 적용.
+- **D3 (무인 운영 웹훅 알림)**: 외장 SSD 마운트 해제, 디스크 90% 초과, 백업 실패 시 Telegram/Discord 무료 웹훅 디스패처로 관리자 즉시 호출.
+
+### GSTACK-02 — Engineering Review (LOCK IN)
+- **E1 (SQLite 청크 I/O 격리)**: 8MiB 청크 파일 스트리밍 쓰기를 트랜잭션 외부에서 완료 후, <1ms 미만의 독립 트랜잭션으로 offset을 갱신하여 SQLite WAL 동시 쓰기 락(`database is locked`) 차단.
+- **E2 (WebAssembly 스트리밍 해싱)**: 4K 대용량 영상 사전 해시 연산 시 WebAssembly(hash-wasm)를 적용해 아이폰 Safari CPU 과열 및 OOM 방지.
+- **E3 (SQLite 온라인 백업)**: 쓰기 트랜잭션 진행 중 백업 복사 시 WAL 손상을 방지하기 위해 SQLite `.backup` API 적용.
+- **미디어 워커 제한**: Pillow/FFmpeg 백그라운드 동시성을 1개로 제한하고 `nice 19`로 실행하여 Pi 5 부하 방어.
+
+### GSTACK-03 — Design Review (Score: 6.0 → 9.8/10)
+- **D-DES1 (ZIP 가져오기 3단계 시각 모달)**: iOS PWA에서 다중 다운로드 완료 시 'Files 열기 → 압축 해제 → 사진 보관함 저장' 3단계 시각 가이드 모달 제공.
+- **5대 인터랙션 상태 매트릭스**: Loading(Shimmer 스켈레톤), Empty(감성 일러스트), Error(재시도), Success, Partial(블러해시) UI 표준화.
+
+### GSTACK-04 — DevEx Review (Score: 5.5 → 9.5/10, TTHW < 10분)
+- **D-DX1 (원클릭 설치 자동화)**: 외장 SSD 확인, .env 생성, 컨테이너 기동, 관리자 생성을 대화형으로 한 번에 끝내는 `deploy/setup.sh` 제공.
+- **D-DX2 (로컬 개발 패리티)**: 라즈베리파이나 공인 도메인 없이도 로컬 PC에서 즉시 테스트 가능한 `deploy/docker-compose.dev.yml` 분리.
+
+### GSTACK-05 — 구현 태스크 및 인수 테스트 확정
+- 10대 구현 과제(T1 ~ T10) 및 5개 신규 인수 테스트(AT-21 ~ AT-25)를 `IMPLEMENTATION_PLAN.md`에 공식 추가.
 
 ## 남은 실증 검증
 

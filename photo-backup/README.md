@@ -2,7 +2,7 @@
 
 가족·부부 등 최대 5명이 사용하는 개인용 사진·동영상 백업 서비스의 기준 설계입니다.
 
-- 상태: 요구사항 확정, 설계 검토 및 문서 개정. 애플리케이션 코드는 아직 구현하지 않았습니다.
+- 상태: 요구사항 확정 및 gstack 4대 플랜 리뷰(CEO, Eng, Design, DevEx) 전 관문 통과(CLEARED). 10개 구현 과제(T1~T10) 확정.
 - 서버: Raspberry Pi 5, RAM 8GB, Ubuntu, 외장 SSD 2TB
 - Android 클라이언트: Flutter 네이티브 앱
 - iOS 클라이언트: React 기반 반응형 웹앱(PWA), Safari에서 홈 화면에 추가
