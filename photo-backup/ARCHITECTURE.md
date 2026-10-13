@@ -1,95 +1,114 @@
 # 시스템 아키텍처
 
-## 1. 논리 구성
+## 1. 플랫폼 구성
 
-모바일 앱은 인터넷을 통해 Caddy가 제공하는 공개 HTTPS 엔드포인트에 연결합니다. Caddy는 일반 사용자 API만 FastAPI로 전달합니다. 관리자 웹과 관리자 API는 설정한 내부 LAN CIDR에서만 허용하며, 외부 인터넷 요청은 프록시 계층에서 차단합니다.
+- Android: Flutter 네이티브 앱
+- iOS: React + TypeScript 기반 PWA. Safari에서 HTTPS 웹사이트를 홈 화면에 추가해 사용
+- 관리자: React + TypeScript 기반 별도 웹앱
+- API: FastAPI
+- DB: SQLite WAL 모드
+- HTTPS/라우팅: Caddy
+- 파일: Raspberry Pi의 Ubuntu 로컬 외장 SSD
 
-    Android / iOS (Flutter)
-              |
-              | HTTPS, public hostname
-              v
-       Router: TCP 80/443 forwarding
-              |
-              v
-           Caddy
-           |             |   -- 관리자 경로: 내부 LAN CIDR에서만 허용
-           v
-       FastAPI + Pydantic
-          |        |
-          |        +-- SQLite (메타데이터, 상태, 감사 로그)
-          |
-          +-- 외장 SSD (원본, 미리보기, 임시 업로드)
+iOS는 네이티브 iOS 앱이 아니므로 Xcode·Mac·IPA 빌드가 필요하지 않습니다. 웹 클라이언트는 Windows/Linux에서도 Node.js로 빌드할 수 있습니다. iPhone에서 앱과 유사한 경험을 제공하되 OS 파일·사진 접근은 Safari 웹 API의 범위에 따릅니다.
 
-       관리자 웹 (React SPA)
-          |
-          +-- 같은 LAN에서 HTTPS 관리 경로로 접근
+## 2. 네트워크와 호스트 분리
 
-공개 엔드포인트의 관리자 경로는 Caddy에서 거부하고, 애플리케이션에서도 관리자 role을 다시 확인합니다. 네트워크 필터 하나만으로 인가를 대체하지 않습니다.
+예시 호스트명이며 실제 도메인은 배포 시 설정합니다.
 
-## 2. 권장 기술 스택
+- photos.example.net: PWA와 일반 사용자 API, 인터넷 공개 HTTPS
+- admin.example.net: 관리자 웹과 관리자 API, 내부 LAN만 허용
 
-| 계층 | 선택 | 구현 원칙 |
+외부 인터넷에서 admin host로 요청하면 Caddy에서 차단합니다. 내부에서는 내부 DNS override로 admin host를 Raspberry Pi의 LAN IP로 해석하도록 권장합니다. 실제 외부/내부 경계는 배포 중 검증합니다.
+
+    Android Flutter ----                        +--> photos host / HTTPS --> Caddy --> FastAPI
+    iOS Safari PWA -----/                                |--> SQLite
+                                                         |--> SSD
+    LAN browser --> admin host --> Caddy allowlist --> FastAPI
+
+공개 호스트에는 관리자 정적 파일 번들이나 관리자 API를 제공하지 않습니다. 관리자 role 검사와 네트워크 접근 제한을 모두 적용합니다.
+
+## 3. 기술 스택
+
+| 계층 | 선택 | 원칙 |
 |---|---|---|
-| 모바일 앱 | Flutter / Dart | 공통 UI 및 네트워크 로직. 사진 보관함·갤러리 저장·보안 저장소는 플랫폼별 플러그인/네이티브 연동 |
-| 관리자 웹 | React + TypeScript + Vite | 정적 번들로 빌드하여 Caddy에서 제공 |
-| API | Python + FastAPI + Pydantic | 인증, 소유권 검사, 파일·메타데이터 처리 |
-| DB | SQLite, WAL | 단일 서버 로컬 SSD에서 사용. DB 파일은 사진 바이너리와 분리 |
-| Reverse proxy | Caddy | HTTPS 인증서 및 요청 라우팅 |
-| 이미지 | Pillow + HEIC 지원 | 원본은 읽기 전용 처리 후 별도 JPEG 미리보기 생성 |
-| 동영상 | FFmpeg / ffprobe | 메타데이터 및 대표 이미지 추출. 전체 재인코딩은 하지 않음 |
-| 서비스 운영 | Docker Compose + systemd | 컨테이너는 데이터 디렉터리를 명시적으로 마운트. systemd는 SSD 마운트 의존성을 보장 |
+| Android | Flutter/Dart | 네이티브 갤러리·다운로드 통합 |
+| iOS 사용자 웹 | React + TypeScript + Vite + PWA | 반응형 파일 선택·업로드·탐색, PWA 정적 셸 캐시 |
+| 관리자 웹 | React + TypeScript + Vite | 별도 빌드 및 관리자 호스트 |
+| API | FastAPI + Pydantic | 소유권 검증과 파일 처리 |
+| DB | SQLite WAL | 단일 호스트의 로컬 파일시스템 |
+| Reverse proxy | Caddy | HTTPS 및 host별 라우팅 |
+| 이미지 | Pillow + HEIC decoder | 미리보기 전용, 원본은 변경하지 않음 |
+| 동영상 | FFmpeg/ffprobe | 메타데이터·대표 이미지, 재인코딩 없음 |
+| 운영 | Docker Compose + systemd | 외장 SSD mount guard |
 
-## 3. 저장 경로
+## 4. 저장 경로
 
     /srv/photo-data/
       originals/{owner_uuid}/{asset_uuid}
       previews/{asset_uuid}.jpg
       upload-tmp/{upload_session_uuid}.part
+      export-tmp/{export_uuid}.zip
       db/app.sqlite3
       db-backups/app-YYYY-MM-DD.sqlite3
 
-- 원본 파일명은 DB의 original_name에 보존하되 물리 저장 경로로 직접 사용하지 않습니다.
-- 저장 경로의 실제 키는 서버가 생성한 UUID로 구성합니다.
-- 미리보기는 원본과 별도 경로에 저장합니다.
-- 업로드 임시 파일은 최종 자산으로 등록되기 전에 일반 라이브러리에 노출하지 않습니다.
-- 파일시스템은 Ubuntu의 로컬 파일시스템을 사용합니다. 네트워크 공유 마운트는 SQLite DB 위치로 사용하지 않습니다.
+- 저장 경로는 서버 생성 UUID이며 파일명은 DB 표시용입니다.
+- 원본, 미리보기, 업로드 임시 파일, ZIP 내보내기를 분리합니다.
+- ZIP은 기본 24시간 TTL 후 정리합니다.
+- 임시 저장 공간을 전체 SSD 여유 공간 계산에 포함합니다.
+- SSD 미마운트 시 OS 루트로 저장하는 fallback은 금지합니다.
 
-## 4. 업로드 흐름
+## 5. 웹/PWA 캐시 및 업로드 재개
 
-1. 인증된 사용자가 예상 파일 크기, 원래 파일명, MIME 정보 및 선택적 기대 해시로 업로드 세션을 생성합니다.
-2. 서버가 사용자 할당량 및 전체 SSD 여유 공간을 확인하고 크기를 예약합니다.
-3. 클라이언트는 순차 청크를 전송합니다. 서버는 현재 오프셋을 유지하고 예상 오프셋과 맞지 않는 청크를 거부합니다.
-4. 업로드 종료 후 서버가 실파일 크기와 SHA-256을 계산합니다.
-5. 사용자 범위에서 동일 해시 자산이 있는지 조회합니다. 중복이면 기본적으로 완료를 보류하고 클라이언트에게 선택 결과를 돌려줍니다.
-6. 정상 파일은 임시 경로에서 최종 경로로 원자적으로 이동합니다.
-7. DB 트랜잭션에 자산과 메타데이터를 등록하고 업로드 세션을 완료 처리합니다.
-8. 별도 작업이 미리보기를 생성합니다. 미리보기 생성 실패는 원본 업로드 성공을 롤백하지 않고 재시도 상태를 기록합니다.
+- Service worker는 HTML/CSS/JS/아이콘 같은 버전이 있는 정적 리소스만 캐시합니다.
+- API, 인증, 원본, 미리보기, 동영상, ZIP은 캐시하지 않고 private/no-store 정책을 적용합니다.
+- PWA는 File.slice()로 파일을 읽고 전송하며 대용량 파일 전체를 메모리에 적재하지 않습니다. 업로드 세션을 만들기 전에 Web Worker와 incremental hash 라이브러리로 전체 SHA-256을 계산해 재선택한 파일이 같은지 검증합니다. 해시 계산 시간과 배터리 사용을 UI에 표시합니다.
+- 업로드 세션 ID와 acknowledged offset은 IndexedDB에 저장할 수 있습니다.
+- 브라우저 종료 후 File 객체가 유지된다고 가정하지 않습니다. 파일 재선택을 요구할 수 있으며 최종 서버 SHA-256 불일치 시 자산 등록을 거부합니다.
+- 백그라운드 지속 업로드를 보장하지 않습니다.
 
-## 5. 다운로드·스트리밍 흐름
+## 6. 업로드 흐름
 
-- 앱은 라이브러리 목록 및 미리보기를 먼저 조회합니다.
-- 사진 원본 다운로드는 인증·소유권 검증 후 스트리밍 응답으로 전송합니다.
-- 동영상은 HTTP Range 요청을 지원합니다. 서버는 파일 전체를 메모리에 적재하지 않고 스트리밍합니다.
-- 일괄 다운로드는 앱의 로컬 대기열이 각 파일을 다운로드한 후 갤러리 저장 API를 호출합니다.
-- 비호환 코덱은 서버 재인코딩 대신 원본 다운로드로 우회합니다.
+1. 클라이언트가 파일을 전체 메모리에 적재하지 않고 읽어 expected SHA-256을 계산하며 진행률을 표시합니다.
+2. 클라이언트가 original_name, expected_size, 필수 expected_sha256로 업로드 세션을 생성합니다.
+3. 서버는 사용자 상태와 같은 사용자 소유의 기존 자산을 해시로 사전 조회합니다. 중복이면 파일 바이트 전송 전에 awaiting_duplicate_choice로 응답합니다.
+4. skip이면 세션을 완료 처리하고 예약·임시 자원을 해제합니다. store_separately이면 할당량과 전체 여유 공간을 확인하고 receiving으로 전환합니다.
+5. 새 파일이면 서버가 사용자 한도와 전체 SSD 여유 공간을 확인하고 예상 크기를 원자적으로 예약합니다.
+6. 클라이언트가 8MiB 청크를 보내고, 서버가 예상 offset과 실제 offset이 같은지 검증합니다.
+7. complete 단계에서 서버가 받은 파일의 실제 크기와 SHA-256을 독립 계산해 클라이언트가 사전 계산한 값을 검증합니다.
+8. 사전 중복 확인 이후 다른 세션이 같은 해시를 먼저 등록한 경합 상황도 완료 단계에서 다시 확인하고 선택을 요구합니다.
+9. 승인된 파일을 UUID 기반 최종 경로로 이동하고 DB 자산·메타데이터를 등록합니다. 완료 응답과 completed_asset_id를 저장해 반복 요청을 멱등 처리합니다.
+10. 제한된 백그라운드 작업으로 미리보기를 생성합니다.
 
-## 6. 데이터·작업 일관성
+사전 해시 계산은 대용량 파일의 시작 지연과 CPU/배터리 사용을 늘릴 수 있습니다. UI는 준비 진행률을 표시하고 Web Worker의 incremental hash를 사용해 전체 파일을 메모리에 적재하지 않아야 합니다.
 
-- 파일 저장과 DB 변경은 하나의 원자적 트랜잭션이 아니므로 업로드 완료 단계를 명시적으로 나눕니다.
-- 서버 시작 시 미완료 세션 및 파일/DB 불일치를 점검할 수 있도록 합니다.
-- 주기적 정리 작업은 만료 업로드 세션, 30일이 지난 휴지통, 고아 파일을 처리합니다.
-- 청소 작업은 자산의 소유권과 상태를 확인한 후에만 영구 삭제합니다.
-- DB 백업은 SQLite의 안전한 백업 절차를 사용하고, 복원 테스트는 운영 DB가 아닌 별도 복사본에서 수행합니다.
+파일시스템 이동과 DB 트랜잭션은 원자적으로 묶이지 않습니다. commit 실패 시 고아 파일 후보를 기록하고 자산 목록에서 숨깁니다. reconciliation 작업은 유예 기간 후 파일/DB 상태를 다시 확인하고 정리합니다.
 
-## 7. 네트워크 구현 지침
+## 7. 원본 다운로드와 ZIP 내보내기
 
-- 외부 포워딩은 TCP 80/443만 허용합니다.
-- Caddy가 일반 사용자 공개 API와 LAN 전용 관리자 경로를 분리합니다.
-- 관리자 허용 CIDR은 실제 가정 LAN 범위로 좁혀 설정합니다. RFC1918 전체를 무조건 허용하지 않습니다.
-- 라우터의 NAT loopback이 지원되지 않으면 LAN 내부 DNS override를 설정해 내부 클라이언트가 도메인을 Raspberry Pi의 LAN IP로 해석하게 합니다.
-- 원본 클라이언트 IP를 기준으로 제한할 때는 Caddy가 직접 수신한 주소를 사용하고, 임의의 X-Forwarded-For 값을 신뢰하지 않습니다.
-- FastAPI는 외부에서 직접 접근할 수 없는 내부 인터페이스 또는 컨테이너 네트워크에 바인딩합니다.
+- 단일 사진·동영상은 소유권 확인 후 streaming response로 전달합니다.
+- 동영상은 HTTP Range 지원을 사용해 부분 요청을 처리합니다.
+- Android는 순차 다운로드 후 갤러리에 저장합니다.
+- iOS PWA 단일 파일은 기본적으로 Files/다운로드에 저장합니다. 작은 파일은 navigator.canShare 검사 후 Web Share API를 선택적으로 사용할 수 있지만 Photos 저장 대상의 제공 여부는 OS가 결정합니다.
+- iOS PWA 다중 선택은 서버 ZIP 내보내기를 사용합니다. ZIP은 Files에 저장되며 사용자가 추출 후 사진 앱으로 가져옵니다.
+- ZIP은 무압축으로 CPU를 아끼고 예상 크기를 예약해 SSD를 보호합니다. ZIP 임시 공간은 사용자 사진 quota에는 포함하지 않고 전체 SSD 여유 공간 검사에 포함합니다.
+- 사용자별 활성 export는 기본 1개, TTL은 24시간입니다.
+- export가 참조하는 자산은 export 완료·취소·만료 전까지 영구 purge를 보류합니다.
 
-## 8. 확장 경계
+## 8. 파일·DB 일관성
 
-MVP는 단일 서버·단일 DB·로컬 파일시스템입니다. 사용자 수 증가, 다중 서버 또는 복잡한 동시 쓰기 요구가 생기기 전에는 PostgreSQL, 객체 스토리지, 별도 큐 시스템을 도입하지 않습니다. 미리보기 생성은 초기에는 제한된 백그라운드 작업으로 처리하며, 처리량이 병목이 될 때 별도 작업 큐를 검토합니다.
+- 업로드 완료는 멱등적으로 처리하고 completed_asset_id를 보존합니다.
+- 영구 삭제는 purging 상태와 재시도 가능한 purge job을 사용합니다.
+- DB 상태를 먼저 기록하고 원본·미리보기를 멱등적으로 삭제한 뒤 DB 관계를 제거합니다.
+- 서버 재시작 후 남은 purge job을 재실행합니다.
+- DB row가 있으나 파일이 없으면 접근을 차단하고 오류로 표시합니다.
+- DB row 없이 파일이 있으면 고아 파일 후보로 기록하고 즉시 삭제하지 않습니다.
+- DB 백업은 SQLite online backup API 또는 일관성을 보장하는 절차를 사용합니다.
+
+## 9. 날짜/EXIF 처리
+
+시간대 정보가 있는 촬영 시각만 UTC로 변환합니다. 시간대 없는 EXIF DateTimeOriginal을 임의로 UTC로 간주하지 않습니다. 원본 문자열, 로컬 시각, offset 여부, UTC 값을 구분해 저장하고 시간대 미확정 데이터가 잘못 이동된 것처럼 표시되지 않도록 합니다.
+
+## 10. 확장 경계
+
+MVP는 단일 서버·SQLite·로컬 파일시스템입니다. PWA와 관리자 웹은 React 기술을 공유해도 빌드 산출물·호스트·세션 정책은 분리합니다. 사용자 증가나 복잡한 동시 쓰기 요구가 생기기 전까지 PostgreSQL, 객체 스토리지, 별도 작업 큐는 도입하지 않습니다.

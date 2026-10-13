@@ -1,83 +1,83 @@
 # 설계 결정 및 미결정 항목
 
-## 1. 기록된 주요 결정
+## 1. 결정 기록
 
-| ID | 결정 | 근거 |
+| ID | 결정 | 이유 |
 |---|---|---|
-| ADR-001 | Flutter로 Android/iOS 앱을 구현 | 두 플랫폼 UI와 API 코드를 최대한 공유 |
-| ADR-002 | FastAPI를 단일 API 서버로 사용 | 소규모 단일 서버에 적합한 개발·운영 구조 |
-| ADR-003 | SQLite를 로컬 SSD에서 사용 | 최대 5명, 단일 서버, 낮은 운영 복잡도 |
-| ADR-004 | 원본은 로컬 파일로 저장하고 DB에는 메타데이터만 저장 | 대용량 파일과 DB 백업을 분리 |
-| ADR-005 | Caddy를 HTTPS 진입점으로 사용 | 인증서 발급·갱신 자동화 |
-| ADR-006 | 백업과 삭제 동기화를 분리 | 휴대폰 삭제가 서버 백업을 지우지 않도록 보장 |
-| ADR-007 | 휴지통은 30일 유지 | 실수 삭제 복구와 용량 회수의 균형 |
-| ADR-008 | 중복 검사는 사용자별 SHA-256 | 정확한 동일 파일 감지, 사용자 간 데이터 존재 여부 보호 |
-| ADR-009 | 공유 기능은 MVP 제외 | 계정·저장·복구 핵심 기능을 먼저 안정화 |
-| ADR-010 | 사진 자동 백업은 MVP 제외 | 수동 업로드에서 무결성과 권한 정책 검증 후 확장 |
-| ADR-011 | DB 백업은 같은 SSD에서 최근 7일 보관 | 논리적 DB 손상/잘못된 변경 복구에 도움. SSD 장애 보호는 아님 |
-| ADR-012 | SSD 암호화와 외부 데이터 사본은 MVP에서 제외 | 서비스 재부팅 편의 및 무료 운영 우선 |
-| ADR-013 | 사용자당 기본 한도는 300GB | 최대 5명, 합계 1.5TB로 2TB 장치의 여유 공간 확보 |
-| ADR-014 | 계정 보관·정지는 사진을 기본 보존 | 계정 작업으로 사진을 실수 삭제하지 않도록 함 |
-| ADR-015 | 관리자 웹은 내부 네트워크에서만 허용 | 관리자 자격 증명과 운영 기능의 외부 노출 방지 |
+| ADR-001 | Android는 Flutter 네이티브, iOS는 React PWA | Mac/Xcode 없이 iOS 클라이언트 배포 |
+| ADR-002 | iOS PWA는 HTTPS에서 홈 화면 앱 형태로 사용 | IPA·서명·스토어 불필요, 브라우저 제약 수용 |
+| ADR-003 | FastAPI 단일 서버 | 낮은 운영 복잡도 |
+| ADR-004 | SQLite WAL, 로컬 SSD | 5명 이하 단일 서버 |
+| ADR-005 | 원본은 파일시스템, 메타데이터는 SQLite | 바이너리·DB 분리 |
+| ADR-006 | Caddy HTTPS | 인증서와 host별 라우팅 |
+| ADR-007 | public photos host와 LAN-only admin host 분리 | 관리자 공개 방지 |
+| ADR-008 | Android token, PWA cookie, admin cookie 분리 | 클라이언트별 인증 방식 일관성 |
+| ADR-009 | 서버 수신 원본 바이트 보존 | 서버 자동 변환 방지. 클라이언트 선택기가 반환하는 리소스는 실기기 검증 필요 |
+| ADR-010 | 백업과 삭제 동기화 분리 | 휴대폰/서버 원본 삭제 방지 |
+| ADR-011 | 휴지통 30일, purging job | 삭제 중 장애 복구 |
+| ADR-012 | 사용자별 SHA-256 중복 감지 및 명시적 선택 | 데이터 격리와 사용자 제어 |
+| ADR-013 | 공유·자동 백업 MVP 제외 | 핵심 수동 백업 기능 우선 |
+| ADR-014 | 사용자당 300GB, 80% 경고 | 전체 저장 공간 여유 |
+| ADR-015 | DB 백업 7일 동일 SSD | 논리적 DB 복구. SSD 자체 장애 보호는 아님 |
+| ADR-016 | SSD 암호화·외부 사본 미적용 | 운영 편의/무료 우선, 데이터 손실 위험 수용 |
+| ADR-017 | ZIP export 24시간 TTL, 사용자당 1개 | iOS PWA의 다중 파일 전달 |
 
-## 2. 초기 설정에서 확정할 값
+## 2. iOS PWA 영향
 
-다음 값은 시작 기본값이며 실제 LAN·디스크·네트워크 상태에 맞게 배포 시 설정해야 합니다.
+네이티브 iOS build/release는 하지 않으며 Flutter iOS target, Xcode, IPA, App Store Connect 및 Apple code signing은 범위에서 제거합니다. 사용자 웹앱은 Linux/Windows에서 Node.js로 빌드하고 public HTTPS host에서 서비스합니다.
 
-- 실제 LAN CIDR: 예를 들어 192.168.1.0/24이지만 환경을 확인해 설정
-- 도메인 또는 DDNS 호스트명
-- 사용자 ID 규칙: 기본은 3~32자, 영문 소문자·숫자·점·밑줄·하이픈 허용 여부를 구현 전에 확정
-- 비밀번호 최소 길이: 기본 12자 이상 권장
-- access token: 15분
-- refresh session: 30일, 회전 및 폐기 지원
-- 청크 크기: 8MiB
-- 업로드 세션 만료: 마지막 활동 후 48시간
-- 대용량 모바일 데이터 경고: 100MiB 이상
-- 감사 로그 보존: 90일
-- 전체 디스크 안전 임계값: 여유 공간 15% 미만 또는 100GB 미만
-- 미리보기 최대 긴 변: 1600px, JPEG 품질 약 85부터 시작. 원본 파일에는 적용하지 않음
-- EXIF/GPS 검색: GPS 좌표 및 GPS 존재 여부는 저장 가능. 도시·주소로 자동 변환하는 역지오코딩은 MVP 범위 밖
+iPhone 사용자는 Safari에서 홈 화면에 추가해 웹앱으로 엽니다. 네이티브 앱과 달리 백그라운드 업로드를 보장하지 않고, 페이지 재시작 후 파일 재선택이 필요할 수 있습니다. 단일 파일은 기본적으로 Files/다운로드에 저장하며, 작은 파일은 지원 여부를 확인한 뒤 공유 시트를 선택적으로 제공합니다. 공유 대상에 Photos 저장이 항상 표시된다고 보장하지 않습니다. 다중 파일은 ZIP → Files → 사용자가 Photos로 가져오기 흐름입니다.
 
-## 3. 수용된 위험
+공식 자료:
+- Apple Safari 홈 화면 웹앱: https://support.apple.com/ko-kr/guide/iphone/iphea86e5236/27/ios/27
+- Web Share API: https://developer.mozilla.org/en-US/docs/Web/API/Web_Share_API
+- Flutter iOS native build requirements: https://docs.flutter.dev/platform-integration/ios/setup
 
-### 원본 데이터의 단일 사본
+## 3. 배포 기본값
 
-사진 원본과 DB 사본이 동일 SSD에 저장됩니다. SSD 자체 고장, 분실, 파일시스템 손상 또는 장치 전체 손실을 복구할 외부 사본이 없습니다. 이 상태에서는 사진이 영구적으로 손실될 수 있습니다.
+- public host: photos.<domain>
+- admin host: admin.<domain>
+- admin LAN CIDR: 실제 내부 네트워크를 확인해 설정
+- 내부 DNS override: admin host를 Raspberry Pi LAN IP로 지정
+- 비밀번호 최소 12자
+- Android access token 15분, refresh session 30일
+- 웹 쿠키 host-only, Secure, HttpOnly, SameSite=Lax
+- chunk 8MiB, HTTP body limit 약 12MiB
+- 업로드 세션 TTL 48시간
+- 모바일 데이터 경고 100MiB
+- 감사 로그 보존 90일
+- export TTL 24시간, 사용자당 동시에 1개
+- 여유 공간이 max(총 용량 15%, 100GB)보다 작으면 업로드/export 차단
+- 미리보기 긴 변 1600px, JPEG 품질 약 85부터 검증
+- 한국어 우선
 
-### 디스크 암호화 미적용
+## 4. 수용 위험
 
-SSD가 물리적으로 분실되거나 제거되면 다른 환경에서 데이터를 읽을 위험이 있습니다. 운영 편의성 우선 결정을 따르되 파일 권한과 물리적 접근을 관리해야 합니다.
+- 단일 SSD: SSD 고장·분실 시 원본 복구 사본 없음
+- 암호화 미적용: SSD 물리적 탈취 시 파일 노출 가능
+- iOS PWA: Photos 저장과 업로드 재개가 브라우저 제약을 받음. 단일 파일 다운로드도 기본 경로는 Files/다운로드이며 공유 시트의 Photos 대상은 보장하지 않음
+- 영구 삭제는 휴지통 30일 만료 뒤 시스템 purge worker만 수행하며 일반 사용자 API에는 즉시 purge 기능이 없음
+- 외부 네트워크: 공인 IP가 있어도 라우터·DNS·ISP 영향으로 실접속 검증 필요
+- 코덱: 일부 동영상은 스트리밍 불가 시 원본 다운로드 사용
 
-### 무료 iOS 직접 설치
+## 5. 이번 검토에서 반영한 수정
 
-Personal Team의 무료 서명·설치 방식에는 프로파일 만료와 재설치 부담이 있습니다. 실제 iOS 빌드와 기기 설치를 P5 단계에서 검증합니다.
+- 잘못된 assets.taken_at 인덱스 제거, asset_metadata timestamp 인덱스로 변경
+- Android token, PWA cookie, admin cookie 인증 분리
+- 중복 업로드 skip/store_separately API와 멱등성 정의
+- 시간대 없는 EXIF를 임의 UTC로 변환하지 않도록 데이터 모델 수정
+- purging 상태와 purge_jobs로 영구 삭제 복구
+- PWA의 Photos 저장/백그라운드 업로드/파일 재선택 제약 명시
+- ZIP export, 공간 예약, 24시간 정리 정책 추가
+- 전역 공간 기준을 max(15%, 100GB)로 명확화
+- PWA service worker에서 개인 미디어/API 캐시 금지
 
-### 인터넷 연결 안정성
+## 6. 남은 검증
 
-공인 IPv4가 있어도 공유기 포워딩, ISP 정책, DNS, NAT loopback, 방화벽 상태에 따라 외부 접속이 실패할 수 있습니다. 배포 시 외부 모바일 네트워크에서 검증해야 합니다.
-
-### 동영상 코덱
-
-서버 재인코딩을 하지 않으므로 일부 포맷은 브라우저/앱 내 스트리밍이 되지 않을 수 있습니다. 원본 다운로드를 대체 경로로 제공합니다.
-
-## 4. 남은 구현 전 결정
-
-- 실제 사용자 ID 규칙 및 비밀번호 정책
-- 관리자 LAN 허용 CIDR과 내부 DNS/NAT loopback 구성
-- iOS 빌드용 Mac/Xcode 환경
-- 사용자별 사진 GPS 정보 표시 수준 및 GPS 검색 UX
-- UI 언어는 MVP에서 한국어 우선
-- 접근성·다크 모드·다중 언어는 핵심 기능 검증 후 확장
-- 모바일 갤러리 저장 플러그인의 Android/iOS 버전별 동작
-- 동영상 미리보기 생성에 필요한 FFmpeg 패키지 및 라이선스 검토
-
-## 5. 공식 문서 참조
-
-- Flutter: https://docs.flutter.dev/
-- FastAPI: https://fastapi.tiangolo.com/
-- SQLite WAL: https://sqlite.org/wal.html
-- SQLite Backup API: https://sqlite.org/backup.html
-- Caddy Automatic HTTPS: https://caddyserver.com/docs/automatic-https
-- OWASP Password Storage Cheat Sheet: https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
-- Android WorkManager: https://developer.android.com/develop/background-work/background-tasks/persistent
-- Apple Developer Program: https://developer.apple.com/programs/
+- 실제 DNS 및 LAN CIDR
+- iPhone 실제 iOS 버전에서 Photos/Files/HEIC/MOV/공유 시트/ZIP 확인
+- Android 최소 지원 OS와 갤러리 저장 기능
+- 메타데이터 원본별 시간대 규칙
+- ZIP 내보내기 취소·공간 부족 UX
+- FFmpeg 패키지 및 라이선스
+- 외부 사진 백업이 없는 위험 수용의 재확인
