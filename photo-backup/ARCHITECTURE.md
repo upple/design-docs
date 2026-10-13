@@ -39,7 +39,7 @@ flowchart TD
         UploadService["업로드 세션 관리자<br/>(8MiB 청크 / Wasm 해시 검증 / 할당량 예약)"]
         ExportService["내보내기 엔진<br/>(무압축 ZIP 스트리밍 & 24h TTL)"]
         MediaWorker["미디어 백그라운드 워커<br/>(동시성 1개 제한 / nice 19 / Pillow·FFmpeg)"]
-        AlertDispatcher["장애 알림 디스패처<br/>(Telegram / Discord 무료 웹훅)"]
+        LocalHealthLog["로컬 상태 기록<br/>(journald + 상태 파일)"]
         Reconciliation["정리 및 복구 워커<br/>(고아 파일 정리 / 30일 휴지통 purge)"]
     end
 
@@ -65,7 +65,7 @@ flowchart TD
     AuthMiddleware --> ExportService
 
     UploadService -->|청크 I/O 분리 스트리밍| UploadTmp
-    UploadService -->|1ms 트랜잭션 오프셋 갱신| SQLiteDB
+    UploadService -->|fsync 후 조건부 offset commit| SQLiteDB
     UploadService -.->|완료 후 썸네일 트리거| MediaWorker
 
     MediaWorker --> Previews
@@ -76,7 +76,7 @@ flowchart TD
     Reconciliation --> Filesystem
 
     MountGuard -.->|마운트 실패 시 서비스 차단| ServiceLayer
-    StorageLayer -.->|I/O 오류 / 디스크 90% 초과| AlertDispatcher
+    StorageLayer -.->|I/O 오류 / 공간 임계값| LocalHealthLog
 ```
 
 공개 호스트에는 관리자 정적 파일 번들이나 관리자 API를 제공하지 않습니다. 관리자 role 검사와 네트워크 접근 제한을 모두 적용합니다.
@@ -115,8 +115,8 @@ flowchart TD
 
 - Service worker는 HTML/CSS/JS/아이콘 같은 버전이 있는 정적 리소스만 캐시합니다.
 - API, 인증, 원본, 미리보기, 동영상, ZIP은 캐시하지 않고 private/no-store 정책을 적용합니다.
-- PWA는 File.slice()로 파일을 읽고 전송하며 대용량 파일 전체를 메모리에 적재하지 않습니다. 업로드 세션을 만들기 전에 Web Worker와 WebAssembly(Wasm) 가속 스트리밍 해시 라이브러리(hash-wasm 등)로 전체 SHA-256을 고속 계산해 재선택한 파일이 같은지 검증합니다. 해시 계산 진행률과 배터리 절감 상태를 UI에 표시합니다.
-- 업로드 중에는 Screen Wake Lock API(navigator.wakeLock.request('screen'))를 호출하여 화면 꺼짐 및 Safari 백그라운드 전환에 따른 연결 단절을 방지하며, UI에 켜짐 유지 인디케이터를 표시합니다.
+- PWA는 File.slice()로 파일을 읽고 전송하며 대용량 파일 전체를 메모리에 적재하지 않습니다. 세션 생성 전 Web Worker 기반 스트리밍 SHA-256을 계산해 재선택 파일 일치 여부를 확인하고 진행률을 표시합니다. Wasm은 선택 가능한 구현 최적화일 뿐이며 고정 처리 시간·발열·배터리 절감을 보장하지 않습니다.
+- 업로드 중 지원되는 경우 Screen Wake Lock API(navigator.wakeLock.request('screen'))를 요청해 화면 자동 잠금 가능성을 줄이고 UI에 실제 활성 상태를 표시합니다. 요청 실패·visibility 변경·잠금 해제를 처리하며 백그라운드 전송 보장으로 설명하지 않습니다. 업로드 재개는 Wake Lock과 독립적입니다.
 - 업로드 세션 ID와 acknowledged offset은 IndexedDB에 저장할 수 있습니다.
 - 브라우저 종료 후 File 객체가 유지된다고 가정하지 않습니다. 파일 재선택을 요구할 수 있으며 최종 서버 SHA-256 불일치 시 자산 등록을 거부합니다.
 - 백그라운드 지속 업로드를 보장하지 않습니다.
@@ -148,32 +148,52 @@ sequenceDiagram
 
     User->>App: 사진/동영상 파일 선택
     activate App
-    App->>App: Screen Wake Lock 활성화 (화면 꺼짐 방지)
-    App->>Worker: File.slice() 전달
-    activate Worker
-    Worker-->>App: 스트리밍 SHA-256 연산 진행률 (hash-wasm)
-    Worker-->>App: expected_sha256 완료
-    deactivate Worker
+    opt PWA에서 Screen Wake Lock 지원
+        App->>App: 화면 잠금 방지 요청 (실패 가능)
+    end
+    opt PWA 클라이언트
+        App->>Worker: File.slice() 전달
+        activate Worker
+        Worker-->>App: 스트리밍 SHA-256 진행률
+        Worker-->>App: expected_sha256 완료
+        deactivate Worker
+    end
+    opt Flutter Android 클라이언트
+        App->>App: 플랫폼 해시 API로 스트리밍 SHA-256 계산
+    end
 
     App->>API: POST /api/v1/upload-sessions (expected_size, expected_sha256)
     activate API
     API->>DB: 사용자 소유 자산 중복 해시 조회
     alt 동일 해시 자산 이미 존재
-        API-->>App: 200 OK (status: awaiting_duplicate_choice)
+        API->>DB: reservation 없이 awaiting_duplicate_choice 세션 생성
+        API-->>App: 200 OK (session_id, status: awaiting_duplicate_choice)
         App->>User: 중복 알림 및 건너뛰기/별도저장 선택 요청
         User->>App: 선택 (skip 또는 store_separately)
-        App->>API: POST /duplicate-choice
+        App->>API: POST /upload-sessions/{id}/duplicate-choice
+        alt skip
+            API->>DB: 상태를 skipped로 기록 (멱등)
+            API-->>App: 200 OK (status: skipped)
+            break 업로드 건너뛰기
+                App-->>User: 중복 파일 건너뜀
+            end
+        else store_separately
+            API->>DB: quota·전역 공간 확인 후 reservation 생성
+            API-->>App: 200 OK (status: receiving, offset: 0)
+        end
+    else 중복 아님
+        API->>DB: 사용자 quota·전역 공간 검사 및 예약
+        API-->>App: 201 Created (upload_session_id, received_bytes: 0)
     end
-    API->>DB: 사용자 한도 및 디스크 여유 공간 원자적 예약 (reservation)
-    API-->>App: 201 Created (upload_session_id, received_bytes: 0)
     deactivate API
 
     loop 모든 8MiB 청크 전송 완료까지
         App->>API: PATCH /upload-sessions/{id}/content (Offset, 8MiB 청크)
         activate API
-        API->>Storage: 임시 파일(.part)에 스트리밍 추가 기록 및 flush
-        Note over API,DB: 디스크 I/O 완료 후 단일 짧은 트랜잭션으로 DB 락 경합 방지
-        API->>DB: UPDATE upload_sessions SET received_bytes = offset + length
+        API->>Storage: 세션별 OS 잠금 하에 예상 offset에 청크 기록
+        API->>Storage: flush + fsync로 청크 데이터 동기화
+        Note over API,DB: 파일 I/O 중 DB write transaction을 유지하지 않음
+        API->>DB: 조건부 UPDATE (received_bytes = 요청 offset) 및 commit
         API-->>App: 200 OK (received_bytes)
         deactivate API
     end
@@ -182,9 +202,8 @@ sequenceDiagram
     activate API
     API->>Storage: 수신 완료된 .part 파일의 실제 크기 및 SHA-256 독립 검증
     alt 무결성 검증 통과
-        API->>Storage: os.replace(upload-tmp/*.part, originals/*) 원자적 이동
-        API->>DB: INSERT INTO assets & asset_metadata (트랜잭션 커밋)
-        API->>DB: UPDATE upload_sessions SET status = 'completed'
+        API->>Storage: 최종 경로로 원자적 rename (디렉터리 fsync 포함)
+        API->>DB: INSERT assets/metadata 및 completed_asset_id/status를 한 트랜잭션으로 commit
         API-->>App: 200 OK (asset_id 등록 완료)
         API-)API: 백그라운드 워커에 미리보기 생성 큐 전달 (nice 19)
     else 해시 불일치 (Integrity Failure)
@@ -193,7 +212,9 @@ sequenceDiagram
         API-->>App: 422 Unprocessable Entity (무결성 검증 실패)
     end
     deactivate API
-    App->>App: Screen Wake Lock 해제
+    opt Wake Lock이 활성 상태
+        App->>App: Screen Wake Lock 해제
+    end
     deactivate App
 ```
 
@@ -204,8 +225,9 @@ stateDiagram-v2
     [*] --> receiving: POST /upload-sessions (신규 파일)
     [*] --> awaiting_duplicate_choice: POST /upload-sessions (기존 동일 해시 감지)
 
-    awaiting_duplicate_choice --> cancelled: choice = skip (자원 즉시 해제)
+    awaiting_duplicate_choice --> skipped: choice = skip (reservation/temp 정리, 멱등)
     awaiting_duplicate_choice --> receiving: choice = store_separately (공간 재예약)
+    skipped --> [*]
 
     receiving --> receiving: PATCH /content (8MiB 청크 순차 수신)
     receiving --> verifying: POST /complete (전체 바이트 수신 완료)
@@ -225,9 +247,9 @@ stateDiagram-v2
     }
 ```
 
-사전 해시 계산은 대용량 파일의 시작 지연과 CPU/배터리 사용을 늘릴 수 있습니다. Wasm 가속 스트리밍 해시와 Web Worker를 통해 메인 스레드 멈춤 없이 빠른 준비를 보장합니다.
+사전 해시는 대용량 파일의 시작 지연과 CPU/배터리 사용을 늘릴 수 있습니다. Web Worker는 메인 스레드 정체를 줄이지만 전체 기기 성능을 보장하지 않으므로 실제 iPhone에서 크기별 시간·메모리·발열을 측정합니다.
 
-청크 전송 시 파일 I/O 스트리밍과 동기화를 먼저 완료한 후, 1ms 미만의 독립 트랜잭션으로 DB offset을 갱신하여 SQLite WAL 쓰기 락 경합(database is locked)을 차단합니다. 파일시스템 이동과 DB 트랜잭션은 원자적으로 묶이지 않으므로 commit 실패 시 고아 파일 후보를 기록하고 자산 목록에서 숨깁니다. reconciliation 작업은 유예 기간 후 파일/DB 상태를 다시 확인하고 정리합니다.
+청크 쓰기는 세션별 OS 잠금으로 직렬화합니다. 파일 바이트를 기록하고 fsync한 뒤 DB offset을 조건부 갱신하고 commit한 경우에만 ACK합니다. DB commit 전 장애로 파일이 더 길면 재시작 시 DB의 승인 offset까지 truncate합니다. DB offset보다 파일이 짧으면 자동으로 offset을 앞당기지 않고 안전 오류로 격리합니다. 파일시스템과 DB는 원자적으로 묶이지 않으므로 최종 rename/DB commit 경계의 고아 파일을 reconciliation으로 탐지합니다. 트랜잭션 시간에 1ms 같은 보장값을 두지 않습니다.
 
 ## 7. 원본 다운로드와 ZIP 내보내기
 
@@ -265,7 +287,7 @@ flowchart TD
     Step3 --> Finish["iOS 사진 보관함(Photos) 가져오기 완료 🎉"]
 ```
 
-## 8. 파일·DB 일관성 및 운영 알림
+## 8. 파일·DB 일관성 및 운영 상태
 
 - 업로드 완료는 멱등적으로 처리하고 completed_asset_id를 보존합니다.
 - 영구 삭제는 purging 상태와 재시도 가능한 purge job을 사용합니다.
@@ -274,7 +296,7 @@ flowchart TD
 - DB row가 있으나 파일이 없으면 접근을 차단하고 오류로 표시합니다.
 - DB row 없이 파일이 있으면 고아 파일 후보로 기록하고 즉시 삭제하지 않습니다.
 - DB 백업은 SQLite online backup API(.backup)를 사용하여 트랜잭션 도중 복사로 인한 WAL 손상을 방지합니다.
-- 디스크 90% 초과, 외장 SSD 언마운트, DB 백업 실패 등 치명적 운영 장애는 Telegram/Discord 무료 웹훅 디스패처로 즉시 관리자에게 통보합니다.
+- 공간 정책은 전체 용량 기준 20% 여유 미만에서 관리자 상태 화면과 로컬 로그에 주의 표시, max(전체 용량의 15%, 100GB) 미만에서 신규 업로드/export 차단, 10% 미만에서 로컬 로그에 긴급 기록으로 통일합니다. SSD 마운트/API 프로세스 상태는 systemd timer 등 API와 독립된 호스트 감시 작업이 journald 및 로컬 상태 파일에 기록합니다. 관리자 화면은 해당 상태를 노출하지만 외부 웹훅·SMS·푸시 알림은 제공하지 않습니다. API/호스트 전체 장애 시 원격 즉시 알림이 없다는 한계를 수용합니다.
 
 ```mermaid
 flowchart LR
@@ -294,26 +316,27 @@ flowchart LR
         end
     end
 
-    subgraph HealthMonitoring["장애 감지 및 알림 (FastAPI Alert Dispatcher)"]
+    subgraph HealthMonitoring["로컬 장애 감지 및 상태 기록"]
         DiskCheck{"디스크 여유 공간<br/>검사"}
         MountCheck{"외장 SSD<br/>마운트 검사"}
         BackupCheck{"SQLite .backup<br/>성공 여부"}
         
-        Webhook["Telegram / Discord 무료 웹훅 디스패처"]
-        AdminAlert["관리자 모바일 즉시 알림 수신 🚨"]
+        LocalHealthLog["journald + 로컬 상태 파일"]
+        AdminStatus["관리자 상태 화면 (API 정상 시)"]
     end
 
     Systemd -->|"마운트 성공 시에만"| Docker
     Docker --> Orig
     Docker --> DBDir
 
-    DiskCheck -->|"여유 공간 10% 미만 (위험)"| Webhook
-    DiskCheck -->|"여유 공간 15% 미만 또는 100GB 미만"| BlockWrite["신규 업로드 & 내보내기 자동 차단"]
-    MountCheck -->|"I/O 에러 / 언마운트 감지"| Webhook
+    DiskCheck -->|"여유 공간 20% 미만 (주의)"| LocalHealthLog
+    DiskCheck -->|"여유 공간 max(15%, 100GB) 미만"| BlockWrite["신규 업로드 및 export 차단"]
+    DiskCheck -->|"여유 공간 10% 미만 (긴급)"| LocalHealthLog
+    MountCheck -->|"I/O 에러 / 언마운트 감지"| LocalHealthLog
     MountCheck -->|"미마운트 시"| EmergencyStop["FastAPI 파일 쓰기 즉시 중단 (OS Root 오염 방지)"]
-    BackupCheck -->|"백업 실패 시"| Webhook
+    BackupCheck -->|"백업 실패 시"| LocalHealthLog
 
-    Webhook --> AdminAlert
+    LocalHealthLog --> AdminStatus
 ```
 
 ## 9. 날짜/EXIF 처리

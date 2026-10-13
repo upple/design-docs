@@ -83,15 +83,15 @@ album owner와 asset owner가 같아야 합니다. 앨범 삭제는 관계만 �
 - received_bytes
 - expected_sha256 NOT NULL
 - temp_object_key
-- status receiving/verifying/awaiting_duplicate_choice/completed/cancelled/failed
+- status receiving/verifying/awaiting_duplicate_choice/completed/skipped/cancelled/failed
 - created_at, updated_at, expires_at
 - reservation_bytes
 - completed_asset_id nullable
-- idempotency_key nullable
+- idempotency_key NOT NULL, unique with owner_id
 
-expected_sha256는 세션 생성 시 필수입니다. 클라이언트는 스트리밍 방식으로 사전 해시를 계산하고 서버는 수신 파일을 독립적으로 계산합니다. 두 값이 다르면 자산 등록을 거부합니다. PWA 재개 시 재선택한 파일의 사전 해시가 세션 값과 일치하지 않으면 전송을 재개하지 않습니다. 사전 중복 감지는 소유자 범위에서만 수행하고, 완료 직전에도 검사해 동시 업로드 경합을 처리합니다. 완료 요청을 재시도할 때 completed_asset_id를 반환해 중복 등록을 막습니다.
+idempotency_key는 NOT NULL이며 owner_id와 복합 unique 제약을 둡니다. 같은 키에 다른 요청 본문이 오면 409를 반환합니다. status=skipped는 사용자가 중복 파일 건너뛰기를 선택한 terminal 상태이며 재시도 시 같은 결과를 반환합니다. expected_sha256는 세션 생성 시 필수입니다. 클라이언트는 스트리밍 방식으로 사전 해시를 계산하고 서버는 수신 파일을 독립적으로 계산합니다. 두 값이 다르면 자산 등록을 거부합니다. PWA 재개 시 재선택한 파일의 사전 해시가 세션 값과 일치하지 않으면 전송을 재개하지 않습니다. 사전 중복 감지는 소유자 범위에서만 수행하고, 완료 직전에도 검사해 동시 업로드 경합을 처리합니다. 완료 요청을 재시도할 때 completed_asset_id를 반환해 중복 등록을 막습니다.
 
-파일 쓰기와 DB offset 변경은 원자적이지 않으므로 복구 시 실제 임시 파일 길이와 DB offset을 대조합니다. 부분 청크를 성공으로 간주하지 않습니다.
+파일 쓰기와 DB offset 변경은 원자적이지 않습니다. 세션별 OS 잠금으로 동시 writer를 직렬화하고, 파일 기록+fsync 후 조건부 DB offset 갱신/commit을 완료한 경우에만 청크 ACK를 보냅니다. 재시작 복구는 DB의 acknowledged offset을 기준으로 파일이 더 길면 truncate+fsync하고, 파일이 더 짧으면 안전 오류로 격리해 세션을 자동 완료하지 않습니다. 부분 청크를 성공으로 간주하거나 offset을 자동으로 앞당기지 않습니다.
 
 ## 7. export_sessions
 
@@ -146,6 +146,7 @@ Web/PWA 및 관리자 웹은 raw cookie secret을 저장하지 않고 hash만 �
 - store_separately duplicate는 물리 중복 크기도 반영
 - 미리보기·DB·로그·임시파일은 사용자 quota와 별도지만 전체 SSD 공간 계산에는 포함
 - 전역 신규 쓰기 차단 기준 = 전체 용량의 15%와 100GB 중 더 큰 여유 공간 기준
+- 공간 정책: 여유 공간 20% 미만은 주의 알림, 차단 임계값 미만은 신규 업로드/export 차단, 여유 공간 10% 미만은 긴급 알림. 알림은 best-effort이며 호스트 장애 감지는 API와 독립된 감시 작업이 담당
 
 ## 12. SQLite 및 마이그레이션
 

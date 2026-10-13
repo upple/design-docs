@@ -57,8 +57,8 @@
 - PLAT-08 iOS PWA 여러 파일은 ZIP으로 Files에 내려받고 사용자가 추출·사진 앱으로 가져옴. PWA가 Photos에 직접 일괄 쓰는 것으로 약속하지 않음
 - PLAT-09 브라우저 저장소에는 세션 복구용 ID·오프셋만 저장. 토큰은 localStorage/IndexedDB에 저장하지 않음
 - PLAT-10 PWA service worker는 정적 셸만 캐시하며 개인 사진·동영상·인증 응답은 캐시하지 않음
-- PLAT-11 iOS PWA 업로드 진행 중 Screen Wake Lock API를 요청하여 화면 자동 잠금에 따른 세션 중단을 방지하고 UI에 '화면 켜짐 유지' 상태를 안내함
-- PLAT-12 iOS PWA 대용량 미디어 사전 해시는 WebAssembly(Wasm) 가속 스트리밍 SHA-256 라이브러리(hash-wasm 등)를 적용하여 연산 시간과 배터리 소모를 최소화함
+- PLAT-11 iOS PWA는 지원되는 경우 업로드 중 Screen Wake Lock을 선택적으로 요청해 화면 자동 잠금 가능성을 줄임. 지원/요청 실패/해제 상태를 처리하며 업로드 재개는 Wake Lock에 의존하지 않음
+- PLAT-12 iOS PWA 대용량 미디어 사전 해시는 Web Worker와 스트리밍 SHA-256(Wasm 구현 사용 가능)으로 처리하며 전체 파일을 메모리에 적재하지 않음. 처리 시간·발열·배터리 영향은 실제 기기에서 측정하고 특정 시간이나 절감을 보장하지 않음
 - PLAT-13 iOS PWA 다중 다운로드(ZIP) 완료 시 사용자가 Files 앱에서 사진 보관함으로 쉽게 가져올 수 있도록 3단계 시각적 가이드 모달(Files 열기 → 압축 해제 → 사진 저장)을 제공함
 
 ## 5. 삭제 및 복원
@@ -88,10 +88,10 @@
 - ADM-04 사용자별 용량 및 전체 디스크 확인
 - ADM-05 인증 실패와 관리자 작업 감사 로그
 - ADM-06 API, DB, SSD 마운트, DB 백업 상태 표시
-- ADM-07 디스크 부족·마운트 오류·백업 실패 경고
+- ADM-07 디스크 부족·마운트 오류·백업 실패를 관리자 상태 화면과 로컬 로그에 표시
 - ADM-08 관리자 웹/API는 별도 관리자 호스트에서 실제 LAN CIDR에만 허용
 - ADM-09 관리자 UI에서 사진을 열람·다운로드하는 기능은 MVP 제외
-- ADM-10 디스크 90% 초과, 외장 SSD 탈락, DB 백업 실패 등 치명적 운영 장애 발생 시 Telegram/Discord 무료 웹훅으로 관리자에게 즉시 알림 발송
+- ADM-10 디스크 여유 공간 20% 미만은 관리자 상태 화면/로컬 로그에 주의 표시, 10% 미만·SSD 마운트 해제·DB 백업 실패는 로컬 로그에 오류 기록. API와 독립된 systemd timer/서비스가 마운트/API 상태를 감지. 외부 웹훅·SMS·푸시 알림은 MVP에서 제공하지 않음
 
 ## 8. 비기능 요구사항
 
@@ -105,10 +105,10 @@
 - NFR-08 PWA의 개인 미디어 캐시 금지
 - NFR-09 CI에서 API·웹 빌드를 재현 가능하게 구성
 - NFR-10 iOS PWA 실기기 테스트 포함
-- NFR-11 라즈베리파이 원클릭 대화형 설치 스크립트(deploy/setup.sh)로 TTHW < 10분 온보딩 지원
+- NFR-11 라즈베리파이 설치 스크립트(deploy/setup.sh)는 반복 가능한 설치를 지원. 설치 시간 목표는 클린 Ubuntu에서 측정하기 전까지 보장 조건으로 사용하지 않음
 - NFR-12 로컬 PC에서 즉시 테스트 가능한 Docker Compose 프로필(deploy/docker-compose.dev.yml) 제공
 - NFR-13 SQLite 일일 백업은 온라인 백업 API(.backup)를 적용해 WAL 복사 손상 방지
-- NFR-14 Pillow/FFmpeg 백그라운드 썸네일 워커는 동시성 1개 제한 및 nice 19로 실행하여 라즈베리파이 5 부하 방지
+- NFR-14 Pillow/FFmpeg 미디어 작업은 동시성 1개와 작업 큐 상한을 기본 적용. nice는 CPU 우선순위만 조정하며 메모리 제한을 보장하지 않으므로 픽셀·시간·스레드 제한과 필요 시 cgroup/container 메모리 상한을 별도로 적용
 
 ## 9. MVP 제외
 

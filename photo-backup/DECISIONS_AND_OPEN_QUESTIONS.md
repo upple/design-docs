@@ -21,11 +21,11 @@
 | ADR-015 | DB 백업 7일 동일 SSD | 논리적 DB 복구. SSD 자체 장애 보호는 아님 (D1 결정으로 유지 재확인) |
 | ADR-016 | SSD 암호화·외부 사본 미적용 | 운영 편의/무료 우선, 데이터 손실 위험 수용 (D1 결정으로 유지 재확인) |
 | ADR-017 | ZIP export 24시간 TTL, 사용자당 1개 | iOS PWA의 다중 파일 전달 |
-| ADR-018 | iOS PWA 업로드 중 Screen Wake Lock 적용 | Safari 화면 자동 꺼짐에 따른 네트워크 세션 단절 방지 (D2) |
-| ADR-019 | WebAssembly(Wasm) 가속 스트리밍 해싱 채택 | 대용량 비디오 사전 해시 연산 시 iPhone CPU 발열 및 OOM 방지 (E2) |
-| ADR-020 | 치명적 운영 장애 시 Telegram/Discord 무료 웹훅 알림 | 무인 운영 중 SSD 탈락·디스크 부족·백업 실패 즉시 인지 (D3) |
+| ADR-018 | iOS PWA 업로드 중 선택적 Screen Wake Lock | 지원 시 화면 자동 잠금 가능성을 줄이는 편의 기능. 백그라운드 전송·네트워크 연속성은 보장하지 않음 (D2) |
+| ADR-019 | 스트리밍 SHA-256 및 Web Worker | 전체 파일 메모리 적재와 메인 스레드 정체를 피함. Wasm은 선택적 최적화이며 시간·발열·배터리 절감을 보장하지 않음 (E2) |
+| ADR-020 | 로컬 운영 상태·로그만 사용 | SSD 탈락·디스크 부족·백업 실패를 로컬 감시와 관리자 화면/로그에 기록. 외부 웹훅·SMS·푸시는 MVP 제외하여 외부 의존성과 비밀정보 관리를 줄임 |
 | ADR-021 | iOS PWA ZIP 다운로드 후 3단계 시각 가이드 모달 제공 | 비개발자 가족 사용자의 Files → 사진 보관함 가져오기 혼선 해소 (D-DES1) |
-| ADR-022 | 원클릭 대화형 setup.sh 및 docker-compose.dev.yml 제공 | 홈랩 1인 운영자 TTHW < 10분 단축 및 로컬 개발 패리티 확보 (D-DX1) |
+| ADR-022 | setup.sh 및 docker-compose.dev.yml 제공 | 반복 가능한 설치와 로컬 개발 패리티를 제공. 설치 시간은 실측 후 평가 (D-DX1) |
 
 ## 2. iOS PWA 영향
 
@@ -74,10 +74,10 @@ iPhone 사용자는 Safari에서 홈 화면에 추가해 웹앱으로 엽니다.
 - purging 상태와 purge_jobs로 영구 삭제 복구
 - PWA의 Photos 저장/백그라운드 업로드/파일 재선택 제약 명시
 - ZIP export, 공간 예약, 24시간 정리 정책 추가
-- 전역 공간 기준을 max(15%, 100GB)로 명확화
+- 전역 공간 기준을 max(15%, 100GB)로 명확화. 여유 공간 20% 미만 주의 알림, 차단 기준 미만 신규 쓰기 차단, 10% 미만 긴급 알림
 - PWA service worker에서 개인 미디어/API 캐시 금지
-- **[CEO Review]** 외장 SSD 단일 보관 정책 고수 재확인(D1), iOS PWA Screen Wake Lock 도입(D2), 장애 웹훅 알림 추가(D3)
-- **[Eng Review]** SQLite WAL 동시 쓰기 락 방지를 위한 청크 I/O 분리(E1), WebAssembly 가속 해싱(E2), SQLite 온라인 백업(.backup) API 적용(E3)
+- **[CEO Review]** 외장 SSD 단일 보관 정책 고수 재확인(D1), iOS PWA 선택적 Wake Lock 도입(D2). 외부 장애 웹훅은 초기 운영 범위(관리자 화면+로그만)와 충돌하므로 제외
+- **[Eng Review]** SQLite WAL 동시 쓰기 락 방지를 위한 청크 I/O 분리(E1), 스트리밍 해싱과 선택적 Wasm 최적화(E2), SQLite 온라인 백업(.backup) API 적용(E3)
 - **[Design Review]** PWA ZIP 다운로드 후 사진 앱 임포트 3단계 시각 가이드 모달(D-DES1), 타임라인 5대 인터랙션 상태 매트릭스 규격화
 - **[DevEx Review]** 원클릭 대화형 배포 스크립트(`deploy/setup.sh`)로 TTHW < 10분 단축(D-DX1), 로컬 개발 프로필(`docker-compose.dev.yml`) 분리
 - 10대 구현 과제(T1~T10)를 도출하여 우선순위화

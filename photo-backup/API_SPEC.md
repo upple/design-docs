@@ -73,18 +73,18 @@ PWA는 session token을 localStorage/IndexedDB에 저장하지 않습니다. 인
 
 ### 생성 요청
 
-필드: original_name, expected_size, client_mime_type, client_modified_at(optional), expected_sha256(required).
+필드: original_name, expected_size, client_mime_type, client_modified_at(optional), expected_sha256(required), idempotency_key(required). idempotency_key는 owner 범위에서 unique하며, 같은 키·같은 요청은 기존 세션 결과를 반환하고 같은 키·다른 요청 본문은 409를 반환합니다.
 
-클라이언트는 파일 전체를 메모리에 적재하지 않고 incremental SHA-256을 계산합니다. 브라우저 구현은 Web Worker와 WebAssembly(Wasm) 가속 스트리밍 해싱(hash-wasm 등)을 사용해 대용량 미디어 처리 시 CPU 발열과 OOM을 방지하고 실시간 준비 진행률을 표시합니다. 업로드 중에는 Screen Wake Lock API를 활성화하여 모바일 화면 꺼짐에 따른 네트워크 중단을 방지합니다. 서버는 기대 hash를 검증 전 입력으로만 취급합니다.
+클라이언트는 파일 전체를 메모리에 적재하지 않고 incremental SHA-256을 계산합니다. 브라우저는 Web Worker와 스트리밍 해시 구현(Wasm 사용 가능)을 이용하고 진행률을 표시합니다. 이는 메인 스레드 정체와 전체 파일 메모리 적재를 피하기 위한 것이며 CPU 발열·배터리 소모·처리 시간을 보장하지 않습니다. Screen Wake Lock은 지원되는 경우 화면 자동 잠금 가능성을 줄이는 선택적 편의 기능이며 백그라운드 전송이나 네트워크 연속성을 보장하지 않습니다. 서버는 기대 hash를 검증 전 입력으로만 취급합니다.
 
 POST 처리 순서:
 1. 계정이 active 상태인지 확인합니다.
 2. expected_size, expected_sha256 형식을 검증합니다.
 3. 해당 owner_id 범위에서 기존 자산 해시를 사전 조회합니다.
-4. 동일 자산이 있으면 awaiting_duplicate_choice로 응답합니다. 이때 원본 바이트를 아직 업로드하지 않았으며 임시 파일 공간은 만들지 않습니다.
+4. 동일 자산이 있으면 업로드 세션 row를 reservation/temp file 없이 awaiting_duplicate_choice 상태로 생성하고 세션 ID와 상태를 반환합니다. 이때 원본 바이트는 아직 업로드하지 않습니다.
 5. 중복이 아니면 사용자 한도와 전체 SSD 여유 공간을 확인하고 전체 크기를 reservation으로 잡은 뒤 receiving 세션을 생성합니다.
 
-중복 선택 요청은 body {"choice":"skip"} 또는 {"choice":"store_separately"}를 사용합니다. skip은 세션을 완료 처리하고 예약을 해제합니다. store_separately는 사용자 한도와 전역 공간을 다시 확인한 후 reservation을 생성하고 receiving 상태로 전환합니다. 모든 중복 검사는 사용자 범위 안에서만 합니다.
+중복 선택 요청은 body {"choice":"skip"} 또는 {"choice":"store_separately"}를 사용합니다. skip은 세션 상태를 terminal 상태인 skipped로 바꾸고 동일한 선택 요청 재시도에도 skipped 결과를 반환합니다. 중복 감지 전 예약을 만들지 않으므로 해제할 예약은 없습니다. store_separately는 사용자 한도와 전역 공간을 다시 확인한 후 reservation을 생성하고 receiving 상태로 전환합니다. 모든 중복 검사는 사용자 범위 안에서만 합니다.
 
 ### 청크 규칙
 
@@ -94,16 +94,17 @@ POST 처리 순서:
 - 서버 수신 offset과 정확히 일치할 때만 기록합니다.
 - 불일치는 409 Conflict와 current offset 반환
 - 요청 본문 제한은 개별 청크보다 조금 큰 값(예: 12MiB)으로 구성합니다. 전체 원본 크기 제한과 혼동하지 않습니다.
-- 청크는 임시 파일에 스트리밍하고, 파일 쓰기 이후 DB received_bytes를 갱신합니다.
-- 장애 시 임시 파일 길이와 DB offset을 대조해 완전하게 기록된 청크 경계로 복구합니다. 부분 청크를 완료된 것으로 간주하지 않습니다.
+- 한 업로드 세션의 청크 쓰기는 세션별 OS 파일 잠금으로 직렬화합니다(단일 프로세스 메모리 잠금만으로는 다중 worker를 보호할 수 없음). 잠금 안에서 DB offset을 다시 확인하고 요청 offset이 정확히 일치할 때만 기록합니다.
+- 청크 바이트를 임시 파일에 기록한 뒤 파일을 flush/fsync하고, 짧은 DB 트랜잭션에서 조건부 offset 갱신을 커밋한 후에만 클라이언트에 ACK합니다. SQLite는 foreign keys와 busy_timeout을 설정하고 `synchronous=FULL` 등 내구성 설정을 명시적으로 구성·시험합니다. 파일 I/O 동안 DB write transaction을 열어 두지 않습니다.
+- 프로세스 시작/세션 복구 시 DB에 커밋된 received_bytes를 기준으로 임시 파일을 검사하고, 파일이 더 길면 마지막 승인 offset까지 truncate+fsync합니다. 파일이 더 짧으면 세션을 안전 오류로 표시해 자동으로 offset을 앞당기지 않습니다. 파일시스템과 DB는 하나의 원자적 트랜잭션이 아니므로 reconciliation이 고아 파일을 기록합니다.
 - TTL 기본값은 마지막 활동 후 48시간입니다.
 - PWA 재개 시 선택 File 참조가 사라졌으면 같은 파일을 다시 선택해야 합니다. 재선택한 파일의 사전 SHA-256이 세션 값과 다르면 기존 세션으로 재개하지 않습니다.
 
 ### 완료 및 동시성
 
-complete는 completed, awaiting_duplicate_choice, integrity_failed, storage_unavailable, quota_exceeded 중 하나를 반환합니다. 서버는 수신 파일의 실제 크기와 SHA-256을 독립 계산합니다. expected_size/hash 불일치면 자산 등록을 거부하고 임시 파일 및 용량 예약을 정리하거나 실패 상태로 안전하게 보존한 뒤 명시적 만료 정책에 따라 정리합니다.
+complete는 completed, awaiting_duplicate_choice, integrity_failed, storage_unavailable, quota_exceeded 중 하나를 반환합니다. skip 선택은 complete와 별도인 duplicate-choice API에서 skipped 결과를 반환합니다. 서버는 수신 파일의 실제 크기와 SHA-256을 독립 계산합니다. expected_size/hash 불일치면 자산 등록을 거부하고 임시 파일 및 용량 예약을 정리하거나 실패 상태로 안전하게 보존한 뒤 명시적 만료 정책에 따라 정리합니다.
 
-사전 검사 통과 후 다른 업로드가 같은 해시로 먼저 등록된 경우 완료 시점에 중복 선택을 다시 요청합니다. 중복 선택과 complete는 멱등적으로 동작해야 하며 completed_asset_id로 같은 자산을 두 번 등록하지 않습니다. 클라이언트가 전송한 MIME 값은 신뢰하지 않고 서버에서 형식·시그니처를 확인합니다.
+사전 검사 통과 후 다른 업로드가 같은 해시로 먼저 등록된 경우 complete는 세션을 verifying에서 awaiting_duplicate_choice로 전환하고 선택을 다시 요청합니다. 완료 직전 해시 중복 검사와 자산 등록은 `(owner_id, sha256)` 기준 OS 잠금으로 직렬화합니다. `store_separately`를 허용하므로 자산 테이블에 해시 unique 제약을 두지는 않습니다. 잠금 안에서 기존 자산을 재확인하고 중복이면 파일을 최종 경로로 이동하기 전에 선택 대기 상태로 commit합니다. 기존 임시 파일과 reservation은 선택이 끝날 때까지 유지하며 TTL로 제한합니다. skip은 skipped terminal 상태로 전환하고 reservation·임시 파일을 멱등적으로 해제합니다. 완료 직전 경합에서 store_separately를 선택하면 이미 잡힌 reservation을 중복 생성하지 않고 해당 reservation을 유지한 채 검증·등록을 재개합니다. 최초 세션 생성 때 중복이 발견된 경우에만 선택 후 새 reservation을 만듭니다. 같은 선택 요청 재시도는 같은 최종 결과를 반환하며 completed_asset_id로 자산을 중복 등록하지 않습니다. 클라이언트가 전송한 MIME 값은 신뢰하지 않고 서버에서 형식·시그니처를 확인합니다.
 
 ## 6. 자산·검색·휴지통
 
@@ -136,7 +137,7 @@ complete는 completed, awaiting_duplicate_choice, integrity_failed, storage_unav
 - ZIP은 SSD export-tmp에 저장하고 만료 시 정리
 - iOS PWA에서는 ZIP을 Files에 다운로드한 후 사용자가 사진 앱으로 가져옴
 - export에서 참조 중인 자산은 작업 종료 전까지 purge를 보류
-- 전역 여유 공간 임계값에 도달하면 시작·진행 중인 export를 안전하게 중단 가능
+- 전역 여유 공간이 쓰기 차단 임계값 아래로 내려가면 신규 export를 거부합니다. 이미 시작된 export는 예약된 공간을 포함해 시작 전에 확보한 여유 공간을 보호하며, 실제 공간 부족 또는 I/O 오류 시 안전하게 실패 처리하고 임시 파일·예약을 멱등적으로 정리합니다.
 
 ## 8. 앨범
 

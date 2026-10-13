@@ -24,7 +24,8 @@
 
 ## P2 — 파일 저장·업로드 재개
 
-- 업로드 세션과 할당량 예약
+- 업로드 세션 멱등 생성과 할당량 예약
+- 세션별 OS 잠금, fsync 후 ACK, 조건부 offset 갱신 및 재시작 복구 테스트
 - 8MiB 청크 및 offset 검증/복구
 - SHA-256 무결성 검사
 - 중복 감지와 duplicate-choice API
@@ -101,11 +102,12 @@
 | AT-18 | DB 백업 복원 | 복원본 SQLite 무결성 통과 |
 | AT-19 | 빈 DB migration | 존재하지 않는 컬럼 인덱스 오류 없음 |
 | AT-20 | 감사 및 서버 로그 | 비밀정보 없음 |
-| AT-21 | PWA Screen Wake Lock | 대용량 업로드 중 화면 꺼짐 방지 및 UI 인디케이터 표시 |
-| AT-22 | Wasm 스트리밍 해싱 | 1GB 비디오 사전 해시 연산 15초 이내 완료 및 브라우저 안정성 유지 |
-| AT-23 | 치명적 장애 웹훅 알림 | SSD 언마운트 또는 디스크 90% 초과 시 Telegram/Discord 알림 즉시 수신 |
-| AT-24 | 원클릭 setup.sh 실행 | 클린 Ubuntu 환경에서 설치부터 관리자 부트스트랩까지 10분 내 완료 |
+| AT-21 | PWA Screen Wake Lock | 지원·거부·해제 상태 처리 및 업로드 재개가 Wake Lock에 의존하지 않음 |
+| AT-22 | 스트리밍 SHA-256 | 기준 iPhone/Safari와 Android 기기에서 대표 파일 크기별 시간·메모리·발열을 측정하고 결과 기록. 미측정 성능 수치 보장 금지 |
+| AT-23 | 로컬 장애 감시 | SSD 언마운트와 API 중단을 API 외부 호스트 감시가 journald/상태 파일에 기록. 공간 20% 주의 표시, 차단 임계값, 10% 긴급 로그 검증. 외부 알림은 없음 |
+| AT-24 | setup.sh 실행 | 클린 Ubuntu에서 설치·관리자 부트스트랩의 성공 여부와 실제 소요 시간을 기록. 시간 목표는 반복 측정 후 확정 |
 | AT-25 | 로컬 dev 프로필 구동 | docker-compose.dev.yml로 실기기/공인 도메인 없이 즉시 로컬 테스트 가능 |
+| AT-26 | 업로드 crash-injection | 청크 fsync 전/후, DB commit 전/후, 최종 rename/asset commit 사이에서 강제 종료 후 재시작. ACK된 바이트 유실·중복 자산·조용한 파일 삭제가 없어야 하며 복구 불가 상태는 명시적 오류로 표시 |
 
 ## gstack 플랜 리뷰 도출 구현 태스크 (Tasks: T1 ~ T10)
 
@@ -116,7 +118,7 @@
 | **T5** | P1 | `services/api` | SQLite 커넥션 하드닝(`busy_timeout=5s`, FK=ON) 및 청크 I/O 격리 | `app/db/session.py`, `app/services/upload.py` | AT-05 다중 전송 부하 통과 |
 | **T7** | P1 | `apps/ios-web` | iOS PWA ZIP 다운로드 후 사진 앱 가져오기 3단계 시각 가이드 모달 | `src/components/ExportGuideModal.tsx` | AT-16 가이드 UI 검증 |
 | **T9** | P1 | `deploy` | 라즈베리파이 원클릭 대화형 설치 스크립트 (`setup.sh`) | `deploy/setup.sh`, `deploy/scripts/bootstrap-admin.sh` | AT-24 통과 |
-| **T2** | P2 | `services/api` | 치명적 운영 장애(SSD 탈락, 디스크 90%, 백업 실패) 무료 웹훅 알림 | `app/services/alert.py`, `app/config.py` | AT-23 통과 |
+| **T2** | P2 | `deploy` | API와 독립된 systemd timer 기반 로컬 장애 감시 및 journald/상태 파일 기록 | `deploy/systemd/photo-backup-healthcheck.*` | AT-23 통과 |
 | **T3** | P2 | `services/api` | Pillow/FFmpeg 백그라운드 썸네일 워커 동시성 1개 제한(`nice 19`) | `app/services/media.py` | 5개 동시 인제스천 CPU 안정성 |
 | **T6** | P2 | `deploy` | SQLite 온라인 백업 API(`.backup`) 일일 백업 스크립트 적용 | `deploy/scripts/backup-db.sh` | AT-18 무결성 검증 |
 | **T8** | P2 | `apps/ios-web` | 5대 인터랙션 상태 표준 컴포넌트(스켈레톤, 빈 화면, 에러 재시도) | `src/components/TimelineStates.tsx`, `EmptyState.tsx` | UI 매트릭스 렌더링 확인 |
@@ -128,5 +130,5 @@
 - Android 및 iPhone 실기기에서 주요 흐름 검증
 - 웹 빌드가 Mac/Xcode 없이 재현 가능
 - 네트워크 경계, 데이터 소유권, hash, 삭제 복구, SSD guard 검증
-- T1~T10 구현 태스크 및 AT-01~AT-25 인수 테스트 통과
+- T1~T10 구현 태스크 및 AT-01~AT-26 인수 테스트 통과
 - 설치·업데이트·DB 복구 운영 문서 작성
