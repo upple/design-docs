@@ -129,10 +129,10 @@ flowchart TD
 4. skip이면 세션을 완료 처리하고 예약·임시 자원을 해제합니다. store_separately이면 할당량과 전체 여유 공간을 확인하고 receiving으로 전환합니다.
 5. 새 파일이면 서버가 사용자 한도와 전체 SSD 여유 공간을 확인하고 예상 크기를 원자적으로 예약합니다.
 6. 클라이언트가 8MiB 청크를 보내고, 서버가 예상 offset과 실제 offset이 같은지 검증합니다.
-7. complete 단계에서 서버가 받은 파일의 실제 크기와 SHA-256을 독립 계산해 클라이언트가 사전 계산한 값을 검증합니다.
-8. 사전 중복 확인 이후 다른 세션이 같은 해시를 먼저 등록한 경합 상황도 완료 단계에서 다시 확인하고 선택을 요구합니다.
-9. 승인된 파일을 UUID 기반 최종 경로로 이동하고 DB 자산·메타데이터를 등록합니다. 완료 응답과 completed_asset_id를 저장해 반복 요청을 멱등 처리합니다.
-10. 제한된 백그라운드 작업(동시성 1개 제한, nice 19)으로 미리보기를 생성해 라즈베리파이 5 부하를 방어합니다.
+7. complete 단계에서 파일 크기가 100MiB 이하인 경우 동기 검증을 수행하고, 100MiB 초과인 경우 202 Accepted (status = 'verifying')를 반환하여 백그라운드 워커가 SHA-256 검증을 비동기 수행합니다.
+8. 완료 시점에 동일 해시가 이미 등록된 경우(사후 중복), awaiting_duplicate_choice로 전이합니다. 이때 사용자가 store_separately를 선택하면(Case B) 추가 용량 예약이나 receiving 역행 없이 즉시 최종 경로로 이동 후 자산 등록을 완료합니다.
+9. 승인된 파일을 UUID 기반 최종 경로로 원자적 이동(os.replace)하고 DB 자산(effective_taken_at 포함) 및 초기 메타데이터(pending)를 한 트랜잭션으로 등록합니다. 완료 응답과 completed_asset_id를 저장해 반복 요청을 멱등 처리합니다.
+10. 제한된 백그라운드 작업(동시성 1개 제한, nice 19)으로 메타데이터 추출(EXIF/FFmpeg) 및 미리보기를 생성해 라즈베리파이 5 부하를 방어합니다. 메타데이터 완료 시 effective_taken_at을 최종 보정합니다.
 
 ### 6.1 청크 업로드 시퀀스 다이어그램
 
@@ -222,24 +222,29 @@ sequenceDiagram
 
 ```mermaid
 stateDiagram-v2
-    [*] --> receiving: POST /upload-sessions (신규 파일)
-    [*] --> awaiting_duplicate_choice: POST /upload-sessions (기존 동일 해시 감지)
+    [*] --> receiving: POST /upload-sessions (신규 파일, reservation=size)
+    [*] --> awaiting_duplicate_choice_pre: POST /upload-sessions (사전 동일 해시 감지, reservation=0)
 
-    awaiting_duplicate_choice --> skipped: choice = skip (reservation/temp 정리, 멱등)
-    awaiting_duplicate_choice --> receiving: choice = store_separately (공간 재예약)
+    awaiting_duplicate_choice_pre --> skipped: choice = skip (정리 및 멱등 응답)
+    awaiting_duplicate_choice_pre --> receiving: choice = store_separately (공간 재검증 후 reservation=size)
     skipped --> [*]
 
     receiving --> receiving: PATCH /content (8MiB 청크 순차 수신)
-    receiving --> verifying: POST /complete (전체 바이트 수신 완료)
+    receiving --> verifying: POST /complete (크기 > 100MiB 비동기 검증 전환, 202 Accepted)
+    receiving --> completed: POST /complete (크기 <= 100MiB 동기 검증 통과 & 단독 자산)
+    receiving --> awaiting_duplicate_choice_post: POST /complete (사후 동시 완료 중복 감지)
     receiving --> cancelled: DELETE /upload-sessions (사용자 취소)
-    receiving --> failed: 48시간 TTL 만료 또는 I/O 오류
+    receiving --> failed: 해시 불일치 / TTL 만료 / I/O 오류
 
-    verifying --> awaiting_duplicate_choice: 완료 직전 동시 업로드 동일 해시 감지
-    verifying --> failed: 서버 독립 SHA-256 불일치
-    verifying --> completed: 무결성 검증 성공 & originals/ 이동 완료
+    verifying --> completed: 백그라운드 검증 성공 & 단독 자산 (원자적 CAS 전이)
+    verifying --> awaiting_duplicate_choice_post: 백그라운드 검증 성공 & 사후 중복 감지 (reservation=size 유지)
+    verifying --> failed: 백그라운드 해시 불일치 / 15분 타임아웃 만료
+
+    awaiting_duplicate_choice_post --> skipped: choice = skip (임시파일 삭제 & reservation 해제)
+    awaiting_duplicate_choice_post --> completed: choice = store_separately (추가 예약 없이 원자적 originals 이동 & 등록)
 
     state "자산(Asset) 생애주기" as AssetLifecycle {
-        [*] --> active: 업로드 완료 등록
+        [*] --> active: 업로드 완료 등록 (effective_taken_at 설정)
         active --> trashed: DELETE /assets/{id} (휴지통 이동)
         trashed --> active: POST /trash/{id}/restore (복원)
         trashed --> purging: 30일 경과 (Purge Worker 시작)
@@ -249,7 +254,7 @@ stateDiagram-v2
 
 사전 해시는 대용량 파일의 시작 지연과 CPU/배터리 사용을 늘릴 수 있습니다. Web Worker는 메인 스레드 정체를 줄이지만 전체 기기 성능을 보장하지 않으므로 실제 iPhone에서 크기별 시간·메모리·발열을 측정합니다.
 
-청크 쓰기는 세션별 OS 잠금으로 직렬화합니다. 파일 바이트를 기록하고 fsync한 뒤 DB offset을 조건부 갱신하고 commit한 경우에만 ACK합니다. DB commit 전 장애로 파일이 더 길면 재시작 시 DB의 승인 offset까지 truncate합니다. DB offset보다 파일이 짧으면 자동으로 offset을 앞당기지 않고 안전 오류로 격리합니다. 파일시스템과 DB는 원자적으로 묶이지 않으므로 최종 rename/DB commit 경계의 고아 파일을 reconciliation으로 탐지합니다. 트랜잭션 시간에 1ms 같은 보장값을 두지 않습니다.
+청크 쓰기는 세션별 OS 잠금으로 직렬화합니다. 파일 바이트를 기록하고 fsync한 뒤 DB offset을 조건부 갱신하고 commit한 경우에만 ACK합니다. DB commit 전 장애로 파일이 더 길면 재시작 시 DB의 승인 offset까지 truncate합니다. DB offset보다 파일이 짧으면 자동으로 offset을 앞당기지 않고 안전 오류로 격리합니다. 파일시스템과 DB는 원자적으로 묶이지 않으므로 최종 rename/DB commit 경계의 고아 파일을 reconciliation으로 탐지합니다. 용량 계산 및 세션 생성/완료 트랜잭션은 `BEGIN IMMEDIATE`와 `PRAGMA busy_timeout = 5000`으로 SQLite 쓰기 락 경합을 방어하며, 트랜잭션 시간에 1ms 같은 비현실적인 보장값을 두지 않습니다.
 
 ## 7. 원본 다운로드와 ZIP 내보내기
 

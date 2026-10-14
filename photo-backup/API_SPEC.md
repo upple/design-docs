@@ -84,7 +84,9 @@ POST 처리 순서:
 4. 동일 자산이 있으면 업로드 세션 row를 reservation/temp file 없이 awaiting_duplicate_choice 상태로 생성하고 세션 ID와 상태를 반환합니다. 이때 원본 바이트는 아직 업로드하지 않습니다.
 5. 중복이 아니면 사용자 한도와 전체 SSD 여유 공간을 확인하고 전체 크기를 reservation으로 잡은 뒤 receiving 세션을 생성합니다.
 
-중복 선택 요청은 body {"choice":"skip"} 또는 {"choice":"store_separately"}를 사용합니다. skip은 세션 상태를 terminal 상태인 skipped로 바꾸고 동일한 선택 요청 재시도에도 skipped 결과를 반환합니다. 중복 감지 전 예약을 만들지 않으므로 해제할 예약은 없습니다. store_separately는 사용자 한도와 전역 공간을 다시 확인한 후 reservation을 생성하고 receiving 상태로 전환합니다. 모든 중복 검사는 사용자 범위 안에서만 합니다.
+중복 선택 요청은 body `{"choice":"skip"}` 또는 `{"choice":"store_separately"}`를 사용합니다.
+- **사전 중복 (Case A, `received_bytes < expected_size`)**: `skip`은 세션 상태를 terminal 상태인 `skipped`로 바꾸고 멱등 응답합니다. `store_separately`는 사용자 한도와 전역 디스크 공간을 검증한 후 `reservation_bytes = expected_size`를 예약하고 `receiving` 상태로 전환합니다.
+- **사후 중복 (Case B, `received_bytes == expected_size`, 완료 검증 중 경합)**: 이미 전체 바이트 수신과 용량 예약이 완료된 상태입니다. `skip`은 임시 파일을 삭제하고 예약을 해제하며 `skipped`로 전이합니다. `store_separately`는 추가 용량 예약이나 `receiving` 역행 없이 즉시 임시 파일을 `originals/`로 원자적 이동(`os.replace`)하고 자산 등록을 완료(`status = 'completed'`, `reservation_bytes = 0`)합니다.
 
 ### 청크 규칙
 
@@ -102,7 +104,9 @@ POST 처리 순서:
 
 ### 완료 및 동시성
 
-complete는 completed, awaiting_duplicate_choice, integrity_failed, storage_unavailable, quota_exceeded 중 하나를 반환합니다. skip 선택은 complete와 별도인 duplicate-choice API에서 skipped 결과를 반환합니다. 서버는 수신 파일의 실제 크기와 SHA-256을 독립 계산합니다. expected_size/hash 불일치면 자산 등록을 거부하고 임시 파일 및 용량 예약을 정리하거나 실패 상태로 안전하게 보존한 뒤 명시적 만료 정책에 따라 정리합니다.
+complete는 파일 크기에 따라 동기 또는 비동기 응답을 반환합니다:
+- **100MiB 이하**: 동기 검증을 수행하여 `200 OK` (`status: completed` 또는 사후 중복 시 `status: awaiting_duplicate_choice`)를 반환합니다.
+- **100MiB 초과**: HTTP 타임아웃 방지를 위해 즉시 `202 Accepted` (`status: verifying`)를 반환하고, 백그라운드 워커가 스트리밍 SHA-256 검증을 수행합니다. 클라이언트는 `GET /upload-sessions/{id}` 폴링으로 최종 완료 여부를 확인합니다.
 
 사전 검사 통과 후 다른 업로드가 같은 해시로 먼저 등록된 경우 complete는 세션을 verifying에서 awaiting_duplicate_choice로 전환하고 선택을 다시 요청합니다. 완료 직전 해시 중복 검사와 자산 등록은 `(owner_id, sha256)` 기준 OS 잠금으로 직렬화합니다. `store_separately`를 허용하므로 자산 테이블에 해시 unique 제약을 두지는 않습니다. 잠금 안에서 기존 자산을 재확인하고 중복이면 파일을 최종 경로로 이동하기 전에 선택 대기 상태로 commit합니다. 기존 임시 파일과 reservation은 선택이 끝날 때까지 유지하며 TTL로 제한합니다. skip은 skipped terminal 상태로 전환하고 reservation·임시 파일을 멱등적으로 해제합니다. 완료 직전 경합에서 store_separately를 선택하면 이미 잡힌 reservation을 중복 생성하지 않고 해당 reservation을 유지한 채 검증·등록을 재개합니다. 최초 세션 생성 때 중복이 발견된 경우에만 선택 후 새 reservation을 만듭니다. 같은 선택 요청 재시도는 같은 최종 결과를 반환하며 completed_asset_id로 자산을 중복 등록하지 않습니다. 클라이언트가 전송한 MIME 값은 신뢰하지 않고 서버에서 형식·시그니처를 확인합니다.
 

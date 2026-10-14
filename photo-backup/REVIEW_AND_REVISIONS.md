@@ -97,6 +97,38 @@ Screen Wake Lock은 화면 자동 잠금 가능성을 줄이는 선택 기능으
 ### 검토 판정
 이 수정은 문서 설계의 정합성을 높이지만 코드 구현이나 실제 데이터 내구성을 증명하지는 않습니다. 특히 파일시스템과 SQLite를 하나의 원자적 트랜잭션으로 만들 수 없으므로 최종 파일 rename/DB commit 경계에서 재시작 시 임시·최종 파일과 세션 상태를 대조해 등록 재시도 또는 고아 격리를 수행해야 합니다. 이 복구와 재시도, ACK된 청크의 crash-injection 검증은 구현 단계의 차단 조건이며 AT-26에 추가했습니다. gstack의 이전 `CLEARED` 표기와 점수는 자동화된 리뷰 관문 결과일 뿐 실기기·부하·장애 주입 테스트 통과를 뜻하지 않으므로 README에서는 구현 전 검증 필요 상태로 바로잡았습니다.
 
+## 3차 정합성 검토 및 아키텍처 보완 (2026-10-14 외부 자문 심층 리뷰 반영: R13 ~ R19)
+
+외부 아키텍처 자문 내용을 바탕으로, 런타임 레이스 컨디션 해소, SQLite Filesort 병목 제거, 동시성 격리 및 PWA 복구력을 강화하는 7가지 핵심 아키텍처 개정을 반영했습니다.
+
+### R13 — 사후 중복 선택 시 상태 머신 역행 및 용량 이중 예약 해소 (수정)
+- **문제**: 대용량 동시 업로드 중 `verifying` 단계에서 동일 해시 자산이 뒤늦게 등록되면 `awaiting_duplicate_choice`로 전이됩니다. 이때 사용자가 `store_separately`를 선택할 경우, 이미 전체 바이트를 수신하고 검증했음에도 다시 `receiving` 상태로 역행하고 이미 예약된 `reservation_bytes` 위에 추가 용량을 이중 예약하는 모순이 있었습니다.
+- **조치**: 중복 대기 상태를 사전(`received_bytes = 0`)과 사후(`received_bytes = expected_size`)로 명확히 분기했습니다. 사후 중복 상태에서 `store_separately` 수신 시, 추가 예약 및 `receiving` 전이 없이 임시 파일을 `/srv/photo-data/originals/{owner_uuid}/{asset_uuid}`로 원자적 이동(`os.replace`)하고 즉시 `status = 'completed'`, `reservation_bytes = 0`으로 완료합니다.
+
+### R14 — 타임라인 단일 정렬 컬럼 및 커버링 복합 인덱스 신설 (수정)
+- **문제**: `assets` 테이블과 `asset_metadata` 테이블이 분리되어 있고 타임존 유무에 따라 `taken_at_utc`와 `taken_at_local`로 나뉘어 있어, 타임라인 정렬 쿼리 시 `COALESCE` 함수로 인해 SQLite 인덱스를 타지 못하고 전체 테이블 정렬(Filesort) 및 임시 B-Tree 메모리 폭증이 발생했습니다.
+- **조치**: `assets` 테이블에 정규화된 타임라인 정렬 기준 컬럼 `effective_taken_at TEXT NOT NULL`을 추가하고, `idx_assets_owner_timeline(owner_id, status, effective_taken_at DESC, id DESC)` 복합 커버링 인덱스를 구축하여 $O(\log N)$ Keyset 커서 조회를 보장합니다.
+
+### R15 — 내보내기 세션 매핑 테이블 신설 및 ZIP 파일명 충돌 회피 (보완)
+- **문제**: `export_sessions` 테이블만으로는 내보내기에 포함된 자산 목록을 원자적으로 추적하기 어려웠으며, 서로 다른 날짜/경로에 촬영되어 동일한 원본 파일명(`IMG_0001.JPG`)을 갖는 여러 자산을 하나의 ZIP으로 압축할 때 아카이브 내부 파일명 덮어쓰기 손실이 발생했습니다.
+- **조치**: `export_session_items` 매핑 테이블을 신설하고, ZIP 내부 상대 경로(`archive_path`) 생성 시 대소문자 무관 중복 감지 알고리즘을 적용하여 2회차 이상 등장 시 `{stem}_{seq}_{asset_id[:6]}.{ext}` 형태로 결정론적 고유성을 부여합니다. CPU 보호를 위해 아카이브는 `ZIP_STORED`(무압축) 방식을 강제합니다.
+
+### R16 — SQLite WAL Concurrency 및 전역 디스크 여유 공간 보호 (보완)
+- **문제**: 기본 SQLite `DEFERRED` 트랜잭션을 사용하면 동시 업로드/내보내기 요청이 동일한 잔여 여유 공간을 읽어 Quota 및 디스크 최소 보호선($\max(15\%, 100\text{GB})$)을 초과하는 TOCTOU(Time-of-Check to Time-of-Use) 경합이 발생했습니다.
+- **조치**: 용량 검증 및 예약 트랜잭션에 `BEGIN IMMEDIATE`와 `PRAGMA busy_timeout = 5000`을 강제했습니다. 아울러 쓰기 락 점유 시간을 줄이기 위해 `users.allocated_bytes` 증분 관리 및 세션 복합 인덱스(`idx_upload_sessions_owner_status`, `idx_export_sessions_owner_status`)를 보강했습니다.
+
+### R17 — 청크 SHA-256 검증 및 대용량 비동기 검증 분기 (개선)
+- **문제**: 8MiB 청크 전송 시 청크 단위 검증이 없어 전송 중 변조를 조기에 발견할 수 없었고, `POST /complete`에서 수 GB 동영상의 SHA-256을 동기 계산할 때 HTTP 타임아웃(60초) 및 프록시 연결 끊김이 발생했습니다.
+- **조치**: 각 청크(`PATCH /content`) 수신 시 8MiB 청크 해시를 기록하고, 파일 크기가 100MiB를 초과하는 경우 즉시 `202 Accepted` (`status = 'verifying'`)를 반환하고 백그라운드 워커가 SHA-256 검증을 비동기 수행하도록 분기했습니다. 워커 크래시 복구를 위해 15분 경과한 `verifying` 세션은 조정 워커가 자동 재검증/정리합니다.
+
+### R18 — 메타데이터 초기 상태 정의 및 NOT NULL 제약 해소 (수정)
+- **문제**: `asset_metadata.metadata_extracted_at`이 `NOT NULL`로 선언되어 있어, 비동기 EXIF/FFmpeg 추출 워커가 작업을 마치기 전에 업로드 완료 시점에서 초기 메타데이터 레코드를 원자적으로 생성할 수 없는 구조적 모순이 있었습니다.
+- **조치**: `metadata_extracted_at`을 `NULL` 허용으로 변경하고, `metadata_status CHECK (metadata_status IN ('pending', 'completed', 'failed'))` 컬럼을 추가하여 자산 생성 트랜잭션에서 즉시 `pending` 메타데이터 레코드가 생성되도록 수정했습니다.
+
+### R19 — PWA 세션 상태 조회 및 멱등 재개 프로토콜 명세 (보완)
+- **문제**: iOS Safari PWA는 백그라운드 실행이 중단되고 앱 재시작 시 `File` 인스턴스 참조가 소실되므로, 사용자가 파일을 다시 선택했을 때 기존 전송량(`received_bytes`)을 조회하여 청크 오프셋을 이어받을 명확한 프로토콜이 부족했습니다.
+- **조치**: `GET /upload-sessions/{id}` 조회 엔드포인트와 `POST /upload-sessions`의 결정론적 `idempotency_key` 기반 멱등 재개(200 OK + `received_bytes`) 동작을 표준화했습니다.
+
 ## 남은 실증 검증
 
 - 모든 migration을 빈 DB에서 실행
@@ -107,3 +139,4 @@ Screen Wake Lock은 화면 자동 잠금 가능성을 줄이는 선택 기능으
 - DB backup restore 및 orphan reconciliation
 
 문서 수정 완료는 애플리케이션 구현이나 운영 환경 검증이 완료되었다는 뜻이 아닙니다.
+
